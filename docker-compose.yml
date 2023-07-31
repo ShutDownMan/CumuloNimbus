@@ -1,0 +1,59 @@
+version: '2.2'
+
+services:
+  mosquitto:
+    restart: unless-stopped
+    image: eclipse-mosquitto
+    ports:
+      - 1883:1883
+      - 9001:9001
+    volumes:
+      - ./services/mosquitto/conf:/mosquitto/config
+    logging:
+      driver: "json-file"
+      options:
+        max-size: 10m
+        max-file: "1"
+        labels: "production_status"
+        env: "os"
+
+  agrometeo-simulator:
+    build: ./services/agrometeo-simulator-py
+    restart: unless-stopped
+    environment:
+      - BROKER_HOST=${BROKER_HOST}
+      - BROKER_PORT=${BROKER_PORT}
+    depends_on:
+      - mosquitto
+    logging:
+      driver: "json-file"
+      options:
+        max-size: 10m
+        max-file: "1"
+        labels: "production_status"
+        env: "os"
+
+  service-bus:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    ports:
+      - "5672:${RABBITMQ_NODE_PORT}"
+      - "15691:15691"
+      - "15692:15692"
+      - "15671:15671"
+      - "15672:15672"
+      - "4369:4369"
+    environment:
+      - RABBITMQ_NODE_PORT=${RABBITMQ_NODE_PORT}
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - ./services/service-bus/lib/rabbitmq:/var/lib/rabbitmq
+      - ./services/service-bus/rabbitmq/etc:/etc/rabbitmq
+    logging:
+      driver: "json-file"
+      options:
+        max-size: 10m
+        max-file: "1"
+        labels: "production_status"
+        env: "os"

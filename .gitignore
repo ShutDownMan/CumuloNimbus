@@ -1,0 +1,5 @@
+.env
+.vscode
+.venv
+services/service-bus/lib
+services/service-bus/rabbitmq
