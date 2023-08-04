@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
             dispatch_strategy: dispatcher::DispatchStrategy::Batched {
                 trigger: dispatcher::DispatchTriggerType::Holdoff {
-                    holdoff: chrono::Duration::seconds(5),
+                    holdoff: chrono::Duration::seconds(100),
                 },
                 max_batch: 100,
             },
