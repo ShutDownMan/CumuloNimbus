@@ -1,0 +1,16 @@
+[package]
+name = "mqtt_ingestor"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.72"
+chrono = "0.4.26"
+rumqttc = "0.22.0"
+tokio = { version = "1.29.1", features = ["full"] }
+uuid = { version = "1.4.1", features = ["v8"] }
+dispatcher = { path = '../dispatcher' }
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"

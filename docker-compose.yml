@@ -23,6 +23,7 @@ services:
     environment:
       - BROKER_HOST=${BROKER_HOST}
       - BROKER_PORT=${BROKER_PORT}
+      - INTERVAL_SECONDS=${INTERVAL_SECONDS}
     depends_on:
       - mosquitto
     logging:

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    './services/ingestor-rs',
+    './services/ingestor-rs/lib/mqtt_ingestor',
+    './services/ingestor-rs/lib/service_bus',
+    './services/ingestor-rs/lib/dispatcher',
+]

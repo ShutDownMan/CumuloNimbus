@@ -3,3 +3,8 @@
 .venv
 services/service-bus/lib
 services/service-bus/rabbitmq
+target
+Cargo.lock
+services/ingestor-rs/lib/mqtt_ingestor/src/lib.rs
+services/ingestor-rs/lib/dispatcher/db
+services/ingestor-rs/lib/dispatcher/.sqlx

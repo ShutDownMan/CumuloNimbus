@@ -1,0 +1,18 @@
+[package]
+name = "ingestor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.72"
+tokio = { version = "1.29.1", features = ["full"] }
+mqtt_ingestor = { path = './lib/mqtt_ingestor' }
+service_bus = { path = './lib/service_bus' }
+dispatcher = { path = './lib/dispatcher' }
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"
+chrono = "0.4.26"
+
+[[bin]]
+name = "ingestor"
+path = "src/main.rs"
