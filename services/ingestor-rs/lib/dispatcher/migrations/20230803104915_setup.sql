@@ -10,10 +10,11 @@ CREATE TABLE DataSeries (
 CREATE TABLE DataPoint (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dataseries_id INTEGER NOT NULL,
-    value_timestamp TIMESTAMP NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
     value REAL NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ack_code INTEGER,
     FOREIGN KEY (dataseries_id) REFERENCES DataSeries(id)
 );
 
