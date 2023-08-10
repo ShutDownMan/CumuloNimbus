@@ -1,21 +1,30 @@
 use anyhow::Result;
+use sqlx::sqlite::SqlitePool;
+use sqlx::{migrate::MigrateDatabase, migrate::Migrator, Sqlite};
+use std::path::Path;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, info};
 
 extern crate dispatcher;
 extern crate mqtt_ingestor;
 extern crate service_bus;
+
+const DB_URL: &str = "sqlite://./db/ingestor.db";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
-    let service_bus = init_service_bus().await?;
+    let sqlite_pool = Arc::new(init_sqlite_pool().await?);
 
-    service_bus.queue_declare("ingestor").await?;
+    let service_bus = Arc::new(init_service_bus().await?);
 
-    let mqtt_ingestor = init_mqtt_ingestor(service_bus).await?;
+    service_bus
+        .simple_queue_declare("persist-dataseries.queue", "persist-dataseries")
+        .await?;
+
+    let mqtt_ingestor = init_mqtt_ingestor(sqlite_pool, service_bus).await?;
 
     match mqtt_ingestor.collector {
         Some(collector) => collector.await?,
@@ -23,6 +32,34 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn init_sqlite_pool() -> Result<SqlitePool> {
+    // create the database if it doesn't exist
+    info!("checking if database exists");
+    if !Sqlite::database_exists(DB_URL).await.unwrap_or(false) {
+        info!("creating database {}", DB_URL);
+        match Sqlite::create_database(DB_URL).await {
+            Ok(_) => info!("Create db success"),
+            Err(error) => panic!("error: {}", error),
+        }
+    } else {
+        info!("database already exists");
+    }
+
+    // initialize the database
+    info!("initializing database");
+    let sqlite_pool = SqlitePool::connect(DB_URL)
+        .await
+        .expect("failed to connect to sqlite");
+
+    // run migrations
+    info!("running migrations");
+    let migrator = Migrator::new(Path::new("./migrations")).await?;
+    migrator.run(&sqlite_pool).await?;
+    info!("migrations complete");
+
+    Ok(sqlite_pool)
 }
 
 async fn init_service_bus() -> Result<service_bus::ServiceBus> {
@@ -37,7 +74,8 @@ async fn init_service_bus() -> Result<service_bus::ServiceBus> {
 }
 
 async fn init_mqtt_ingestor(
-    service_bus: service_bus::ServiceBus,
+    sqlite_pool: Arc<SqlitePool>,
+    service_bus: Arc<service_bus::ServiceBus>,
 ) -> Result<mqtt_ingestor::MqttIngestor> {
     let mqtt_connector_config = mqtt_ingestor::MqttConnectorConfig {
         mqtt_options: mqtt_ingestor::MqttConnectionOptions {
@@ -49,7 +87,7 @@ async fn init_mqtt_ingestor(
         mqtt_subscribe_topic: "agrometeo/stations/#".to_string(),
     };
 
-    let mut _sensor_dataseries_mapping = std::collections::HashMap::from([
+    let sensor_dataseries_mapping = std::collections::HashMap::from([
         (
             "agrometeo/stations/1/1/1".to_string(),
             "94442585-0168-4688-8532-31e20520a41f".to_string(),
@@ -69,18 +107,17 @@ async fn init_mqtt_ingestor(
     ]);
 
     let mqtt_converter_config = mqtt_ingestor::MqttConverterConfig {
-        sensor_dataseries_mapping: _sensor_dataseries_mapping,
+        sensor_dataseries_mapping,
     };
     let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
         dispatch_strategy: dispatcher::DispatchStrategy::Batched {
             trigger: dispatcher::DispatchTriggerType::Interval {
-                interval: std::time::Duration::from_secs(5),
+                interval: std::time::Duration::from_secs(60),
             },
             max_batch: 100,
         },
     };
-    let service_bus = Arc::new(service_bus);
-    let dispatcher = dispatcher::Dispatcher::new(service_bus).await;
+    let dispatcher = dispatcher::Dispatcher::new(sqlite_pool.clone(), service_bus.clone()).await;
     if let Err(e) = dispatcher {
         error!("dispatcher initialize failed: {:?}", e);
         return Err(e);
@@ -91,8 +128,9 @@ async fn init_mqtt_ingestor(
         mqtt_connector_config,
         mqtt_converter_config,
         mqtt_dispatcher_config,
-        dispatcher,
-    );
+        dispatcher.clone(),
+    )
+    .unwrap();
 
     let _ = mqtt_ingestor.initialize().await;
 

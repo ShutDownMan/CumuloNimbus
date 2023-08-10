@@ -32,7 +32,7 @@ def generate_measurements(noises):
             for magnitude_id in magnitude_ids:
                 noise = noises[(station_id, sensor_id, magnitude_id)]
                 data[(station_id, sensor_id, magnitude_id)] = noise(
-                    [station_id, sensor_id, magnitude_id]) * 100
+                    [time.time()]) * 100
 
     print(data)
     return data
@@ -57,7 +57,7 @@ def main():
         for sensor_id in sensor_ids:
             for magnitude_id in magnitude_ids:
                 noises[(station_id, sensor_id, magnitude_id)] = PerlinNoise(
-                    octaves=2.7, seed=station_id+sensor_id*10+magnitude_id*100)
+                    octaves=2.999, seed=(station_id+sensor_id*10+magnitude_id*100)/100)
 
     # generate random data
     def generate_data():
@@ -67,7 +67,7 @@ def main():
         # send data to a broker
         print("Sending data to a broker...")
         for key, value in generated_measurements.items():
-            # print(f"agrometeo/stations/{key[0]}/{key[1]}/{key[2]}: {value}")
+            print(f"agrometeo/stations/{key[0]}/{key[1]}/{key[2]}: {value}")
             client.publish(
                 f"agrometeo/stations/{key[0]}/{key[1]}/{key[2]}", value)
             # wait interval_seconds seconds

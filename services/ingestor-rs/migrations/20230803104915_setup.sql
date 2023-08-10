@@ -13,7 +13,7 @@ CREATE TABLE DataPoint (
     timestamp TIMESTAMP NOT NULL,
     value REAL NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at TIMESTAMP DEFAULT NULL,
     ack_code INTEGER,
     FOREIGN KEY (dataseries_id) REFERENCES DataSeries(id)
 );

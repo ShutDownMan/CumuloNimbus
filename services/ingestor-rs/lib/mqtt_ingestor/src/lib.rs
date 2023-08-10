@@ -51,8 +51,8 @@ impl MqttIngestor {
         mqtt_converter: MqttConverterConfig,
         mqtt_dispatcher: MqttDispatchConfig,
         dispatcher: Arc<dispatcher::Dispatcher>,
-    ) -> Self {
-        MqttIngestor {
+    ) -> Result<Self> {
+        Ok(MqttIngestor {
             mqtt_connector,
             mqtt_converter,
             mqtt_dispatcher,
@@ -60,7 +60,7 @@ impl MqttIngestor {
             mqtt_eventloop: None,
             collector: None,
             dispatcher,
-        }
+        })
     }
 
     pub async fn initialize(&mut self) -> Result<()> {
@@ -152,8 +152,8 @@ impl MqttIngestor {
 
             // select between the mqtt eventloop and the interval
             tokio::select! {
-                biased;
-                notification = notification => handle_notification(
+                // biased;
+                notification = notification => Self::handle_notification(
                     notification.context("mqtt eventloop poll failed")?,
                     &mqtt_converter,
                     &mut dataseries_buffer,
@@ -166,6 +166,91 @@ impl MqttIngestor {
                 }
             }
         }
+    }
+
+    async fn handle_notification(
+        notification: rumqttc::Event,
+        mqtt_converter: &MqttConverterConfig,
+        dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
+        dispatcher: &dispatcher::Dispatcher,
+        dispatch_strategy: &dispatcher::DispatchStrategy,
+    ) -> Result<()> {
+        if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) = notification {
+            // check if the topic path is in the mapping
+            if let Some(dataseries_id) =
+                mqtt_converter.sensor_dataseries_mapping.get(&publish.topic)
+            {
+                // convert the payload to a f64
+                let payload = match std::str::from_utf8(&publish.payload) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        error!("mqtt payload is not valid utf8: {}", err);
+                        return Err(err.into());
+                    }
+                };
+                // convert the payload to a f64
+                let value = match payload.parse::<f64>() {
+                    Ok(value) => value,
+                    Err(err) => {
+                        error!("mqtt payload is not a valid f64: {}", err);
+                        return Err(err.into());
+                    }
+                };
+                // convert the dataseries id to a uuid
+                let dataseries_uuid = match Uuid::parse_str(dataseries_id) {
+                    Ok(dataseries_uuid) => dataseries_uuid,
+                    Err(err) => {
+                        error!("mqtt dataseries id is not a valid uuid: {}", err);
+                        return Err(err.into());
+                    }
+                };
+
+                debug!(
+                    "adding datapoint to dataseries {}",
+                    dataseries_uuid.to_string()
+                );
+                // check if the dataseries is not already in the buffer
+                dataseries_buffer
+                    .entry(dataseries_uuid)
+                    .or_insert_with(Vec::new);
+
+                // add the datapoint to the buffer
+                dataseries_buffer
+                    .get_mut(&dataseries_uuid)
+                    .unwrap()
+                    .push(dispatcher::DataPoint {
+                        timestamp: chrono::Utc::now(),
+                        value,
+                    });
+
+                // check if the dataseries is already in the buffer
+                if let Some(dataseries_buffer) = dataseries_buffer.get_mut(&dataseries_uuid) {
+                    let should_dispatch = check_dispatch_trigger(
+                        dataseries_buffer,
+                        dispatch_strategy,
+                        &dataseries_uuid,
+                    )
+                    .await;
+
+                    if should_dispatch {
+                        // create a dataseries
+                        let dataseries = dispatcher::DataSeries {
+                            dataseries_id: dataseries_uuid,
+                            values: dataseries_buffer.clone(),
+                        };
+
+                        // dispatch the dataseries
+                        if let Err(err) = dispatcher.dispatch(&dataseries).await {
+                            error!("mqtt dispatch failed: {}", err);
+                        }
+
+                        // clear the buffer
+                        dataseries_buffer.clear();
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn handle_interval_tick(
@@ -184,7 +269,12 @@ impl MqttIngestor {
             };
 
             // dispatch the dataseries
-            dispatcher.dispatch(&dataseries).await?;
+            dispatcher
+                .dispatch(&dataseries)
+                .await
+                .context("mqtt dispatch failed")?;
+
+            debug!("mqtt dispatched dataseries: {}", dataseries_uuid);
 
             // clear the buffer
             dataseries_buffer.clear();
@@ -209,86 +299,6 @@ impl MqttIngestor {
 
         Ok(())
     }
-}
-
-async fn handle_notification(
-    notification: rumqttc::Event,
-    mqtt_converter: &MqttConverterConfig,
-    dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
-    dispatcher: &dispatcher::Dispatcher,
-    dispatch_strategy: &dispatcher::DispatchStrategy,
-) -> Result<()> {
-    if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) = notification {
-        // check if the topic path is in the mapping
-        if let Some(dataseries_id) = mqtt_converter.sensor_dataseries_mapping.get(&publish.topic) {
-            // convert the payload to a f64
-            let payload = match std::str::from_utf8(&publish.payload) {
-                Ok(payload) => payload,
-                Err(err) => {
-                    error!("mqtt payload is not valid utf8: {}", err);
-                    return Err(err.into());
-                }
-            };
-            // convert the payload to a f64
-            let value = match payload.parse::<f64>() {
-                Ok(value) => value,
-                Err(err) => {
-                    error!("mqtt payload is not a valid f64: {}", err);
-                    return Err(err.into());
-                }
-            };
-            // convert the dataseries id to a uuid
-            let dataseries_uuid = match Uuid::parse_str(dataseries_id) {
-                Ok(dataseries_uuid) => dataseries_uuid,
-                Err(err) => {
-                    error!("mqtt dataseries id is not a valid uuid: {}", err);
-                    return Err(err.into());
-                }
-            };
-
-            debug!(
-                "adding datapoint to dataseries {}",
-                dataseries_uuid.to_string()
-            );
-            // check if the dataseries is not already in the buffer
-            dataseries_buffer
-                .entry(dataseries_uuid)
-                .or_insert_with(Vec::new);
-
-            // add the datapoint to the buffer
-            dataseries_buffer
-                .get_mut(&dataseries_uuid)
-                .unwrap()
-                .push(dispatcher::DataPoint {
-                    timestamp: chrono::Utc::now(),
-                    value,
-                });
-
-            // check if the dataseries is already in the buffer
-            if let Some(dataseries_buffer) = dataseries_buffer.get_mut(&dataseries_uuid) {
-                let should_dispatch =
-                    check_dispatch_trigger(dataseries_buffer, dispatch_strategy, &dataseries_uuid)
-                        .await;
-
-                if should_dispatch {
-                    // create a dataseries
-                    let dataseries = dispatcher::DataSeries {
-                        dataseries_id: dataseries_uuid,
-                        values: dataseries_buffer.clone(),
-                    };
-
-                    // dispatch the dataseries
-                    if let Err(err) = dispatcher.dispatch(&dataseries).await {
-                        error!("mqtt dispatch failed: {}", err);
-                    }
-
-                    // clear the buffer
-                    dataseries_buffer.clear();
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn check_dispatch_trigger(

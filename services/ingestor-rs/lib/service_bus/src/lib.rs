@@ -1,16 +1,19 @@
 use anyhow::Result;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use futures_lite::stream::StreamExt;
 use lapin::{
     options::*, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Channel,
     Connection, ConnectionProperties,
 };
+use std::io::prelude::*;
 use tracing::{debug, info};
 
 pub use capnp;
 pub mod schemas;
 
 pub struct ServiceBus {
-    connection: Connection,
+    _connection: Connection,
     channel: Channel,
 }
 
@@ -26,24 +29,39 @@ impl ServiceBus {
         let channel = connection.create_channel().await?;
 
         Ok(ServiceBus {
-            connection,
+            _connection: connection,
             channel,
         })
     }
 
-    pub async fn queue_declare(&self, queue_name: &str) -> Result<()> {
+    pub async fn simple_queue_declare(&self, queue_name: &str, routing_key: &str) -> Result<()> {
         info!("declaring queue {}", queue_name);
 
-        let queue = self
-            .channel
+        self.channel
             .queue_declare(
                 queue_name,
                 QueueDeclareOptions::default(),
                 FieldTable::default(),
             )
-            .await?;
+            .await
+            .expect("error on queue declare");
 
-        info!(?queue, "Declared queue");
+        info!("Declared queue");
+
+        info!("binding queue {} to exchange {}", queue_name, routing_key);
+
+        self.channel
+            .queue_bind(
+                queue_name,
+                "amq.direct",
+                routing_key,
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .expect("error on queue bind");
+
+        info!("Bound queue");
 
         Ok(())
     }
@@ -89,19 +107,38 @@ impl ServiceBus {
     }
 
     // publish message with capnp
-    pub async fn capnp_publish_message(&self, queue_name: &str, message: &[u8]) -> Result<()> {
-        info!("publishing message to queue {}", queue_name);
+    pub async fn capnp_publish_message(
+        &self,
+        exchange: &str,
+        routing_key: &str,
+        message: &[u8],
+        compress: bool,
+    ) -> Result<()> {
+        info!("publishing message to queue {}", routing_key);
 
         debug!("message length: {}", message.len());
+        let mut properties =
+            BasicProperties::default().with_content_type("application/capnp".into());
+
+        let message = if compress {
+            properties = properties.with_content_encoding("gzip".into());
+            self.gzip(message).await?
+        } else {
+            message.to_vec()
+        };
+
+        debug!("compressed message length: {}", message.len());
+
+        // let message: &[u8] = message;
 
         let confirm = self
             .channel
             .basic_publish(
-                "",
-                queue_name,
+                exchange,
+                routing_key,
                 BasicPublishOptions::default(),
-                message,
-                BasicProperties::default().with_content_type("application/capnp".into()),
+                &message,
+                properties,
             )
             .await?
             .await?;
@@ -109,6 +146,13 @@ impl ServiceBus {
         assert_eq!(confirm, Confirmation::NotRequested);
 
         Ok(())
+    }
+
+    pub async fn gzip(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(message)?;
+        let compressed_bytes = encoder.finish()?;
+        Ok(compressed_bytes)
     }
 }
 

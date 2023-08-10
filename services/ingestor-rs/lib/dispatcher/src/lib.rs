@@ -1,19 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::prelude::*;
-use service_bus::capnp::data;
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
-use sqlx::{migrate::MigrateDatabase, migrate::Migrator, Sqlite};
-use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 extern crate service_bus;
-
-const DB_URL: &str = "sqlite://./lib/dispatcher/db/ingestor.db";
-// const DB_URL: &str =
-//     "sqlite:///home/jedi/workspace/Nimbus/services/ingestor-rs/lib/dispatcher/db/ingestor.db";
 
 #[derive(Clone, Debug)]
 pub struct DataPoint {
@@ -28,7 +21,7 @@ pub struct DataSeries {
 }
 
 pub struct Dispatcher {
-    sqlite_pool: SqlitePool,
+    sqlite_pool: Arc<SqlitePool>,
     service_bus: Arc<service_bus::ServiceBus>,
 }
 
@@ -55,39 +48,10 @@ struct DBDataPoint {
 }
 
 impl Dispatcher {
-    pub async fn new(service_bus: Arc<service_bus::ServiceBus>) -> Result<Self> {
-        // create the database if it doesn't exist
-        info!("checking if database exists");
-        if !Sqlite::database_exists(DB_URL).await.unwrap_or(false) {
-            info!("creating database {}", DB_URL);
-            match Sqlite::create_database(DB_URL).await {
-                Ok(_) => info!("Create db success"),
-                Err(error) => panic!("error: {}", error),
-            }
-        } else {
-            info!("database already exists");
-        }
-
-        // initialize the database
-        info!("initializing database");
-        let sqlite_pool = SqlitePool::connect(DB_URL)
-            .await
-            .expect("failed to connect to sqlite");
-
-        sqlx::query!(
-            r#"
-            VACUUM;
-            "#
-        )
-        .execute(&sqlite_pool)
-        .await?;
-
-        // run migrations
-        info!("running migrations");
-        let migrator = Migrator::new(Path::new("./lib/dispatcher/migrations")).await?;
-        migrator.run(&sqlite_pool).await?;
-        info!("migrations complete");
-
+    pub async fn new(
+        sqlite_pool: Arc<SqlitePool>,
+        service_bus: Arc<service_bus::ServiceBus>,
+    ) -> Result<Self> {
         // create the dispatcher
         Ok(Dispatcher {
             sqlite_pool,
@@ -102,10 +66,14 @@ impl Dispatcher {
         );
 
         // save the dataseries to the database
-        self.save_dataseries(dataseries).await?;
+        self.save_dataseries(dataseries)
+            .await
+            .context("failed to save dataseries")?;
 
         // send the dataseries to the service_bus
-        self.send_dataseries(&dataseries.dataseries_id).await?;
+        self.send_dataseries(&dataseries.dataseries_id)
+            .await
+            .context("failed to send dataseries")?;
 
         Ok(())
     }
@@ -137,7 +105,7 @@ impl Dispatcher {
             sqlx::query(
                 r#"
                 INSERT INTO DataPoint (dataseries_id, timestamp, value, created_at)
-                VALUES (?, ?, ?, DATE('now'));
+                VALUES (?, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'));
                 "#,
             )
             .bind(dataseries_id)
@@ -156,15 +124,16 @@ impl Dispatcher {
         info!("sending dataseries of id {:?}", dataseries_id);
 
         info!("fetching dataseries from database");
+        let mut executor = self.sqlite_pool.begin().await?;
         let res = sqlx::query(
             r#"
-            SELECT external_id
-            FROM DataSeries
-            WHERE external_id = ?;
+                SELECT external_id
+                FROM DataSeries
+                WHERE external_id = ?;
             "#,
         )
         .bind(dataseries_id.to_string())
-        .fetch_one(&self.sqlite_pool)
+        .fetch_one(&mut *executor)
         .await
         .context("failed to fetch dataseries from database")?;
         let dataseries_id: String = res.try_get("external_id")?;
@@ -173,14 +142,15 @@ impl Dispatcher {
         info!("fetching datapoints from database");
         let mut rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
             r#"
-            SELECT "timestamp", "value"
-            FROM DataPoint
-            WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?)
-            ORDER BY timestamp ASC;
+                SELECT "timestamp", "value"
+                FROM DataPoint
+                WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?)
+                AND sent_at IS NULL
+                ORDER BY timestamp ASC;
             "#,
         )
         .bind(dataseries_id.clone())
-        .fetch_all(&self.sqlite_pool)
+        .fetch_all(&mut *executor)
         .await
         .context("failed to fetch datapoints from database")?;
 
@@ -189,15 +159,20 @@ impl Dispatcher {
         let mut datapoints: Vec<DBDataPoint> = Vec::new();
 
         for row in rows.drain(..) {
-            let timestamp: i64 = row.try_get("timestamp")?;
-            let value: f64 = row.try_get("value")?;
+            let timestamp: i64 = row
+                .try_get("timestamp")
+                .context("failed to get timestamp")?;
+            let value: f64 = row.try_get("value").context("failed to get value")?;
             if let Some(timestamp) = Utc.timestamp_opt(timestamp, 0).single() {
                 datapoints.push(DBDataPoint { timestamp, value });
+            } else {
+                error!("failed to parse timestamp");
             }
         }
 
         info!("transforming dataseries into bytearray with capnp");
         info!("datapoints length: {}", datapoints.len());
+        // TODO: break this into a separate function
         let buffer: Vec<u8> = {
             let mut message = service_bus::capnp::message::Builder::new_default();
             let mut dataseries =
@@ -213,18 +188,34 @@ impl Dispatcher {
             }
 
             let mut buffer = Vec::new();
-            service_bus::capnp::serialize::write_message(&mut buffer, &message)?;
+            service_bus::capnp::serialize::write_message(&mut buffer, &message)
+                .context("failed to serialize message")?;
 
-            // vec to bytearray
             buffer
         };
-        let buffer: &[u8] = &buffer;
 
         info!("sending dataseries to service bus");
         self.service_bus
-            .capnp_publish_message("ingestor", buffer)
+            .capnp_publish_message("amq.direct", "persist-dataseries", &buffer, true)
             .await
             .context("failed to send message to service bus")?;
+        info!("dataseries sent to service bus");
+
+        info!("marking datapoints as sent");
+        sqlx::query(
+            r#"
+                UPDATE DataPoint
+                SET sent_at = DATE('now')
+                WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?);
+            "#,
+        )
+        .bind(dataseries_id)
+        .execute(&mut *executor)
+        .await
+        .context("failed to mark datapoints as sent")?;
+
+        info!("committing transaction");
+        executor.commit().await?;
 
         Ok(())
     }

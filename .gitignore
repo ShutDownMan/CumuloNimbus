@@ -1,9 +1,9 @@
 .env
 .vscode
 .venv
+.sqlx
 services/service-bus/lib
 services/service-bus/rabbitmq
 target
 Cargo.lock
-services/ingestor-rs/lib/dispatcher/db
-services/ingestor-rs/lib/dispatcher/.sqlx
+services/ingestor-rs/db
