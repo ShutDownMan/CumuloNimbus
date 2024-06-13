@@ -116,7 +116,7 @@ impl ServiceBus {
     ) -> Result<()> {
         info!("publishing message to queue {}", routing_key);
 
-        debug!("message length: {}", message.len());
+        debug!("raw message length: {}", message.len());
         let mut properties =
             BasicProperties::default().with_content_type("application/capnp".into());
 
@@ -127,9 +127,11 @@ impl ServiceBus {
             message.to_vec()
         };
 
-        debug!("compressed message length: {}", message.len());
-
-        // let message: &[u8] = message;
+        if compress {
+            debug!("compressed message length: {}", message.len());
+        } else {
+            debug!("uncompressed message length: {}", message.len());
+        }
 
         let confirm = self
             .channel

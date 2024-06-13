@@ -316,7 +316,7 @@ async fn check_dispatch_trigger(
                 debug!("should dispatch batched dataseries {}", dataseries_uuid);
             } else {
                 debug!(
-                    "not enough datapoints {} for dataseries {}",
+                    "not enough datapoints ({}) for dataseries {}",
                     dataseries_buffer.len(),
                     dataseries_uuid
                 );

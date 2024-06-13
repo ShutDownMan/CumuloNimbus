@@ -1,7 +1,7 @@
 # persistor.capnp
 @0x9d15012e82f5c7e5;
 
-struct DataSeries {
+struct PersistDataSeries {
   id @0 :Text;
   type @1 :DataType;
   values @2 :List(DataPoint);
@@ -22,4 +22,8 @@ struct DataSeries {
       arbitrary @4 :Data;
     }
   }
+}
+
+struct FetchDataSeries {
+  id @0 :Text;
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-extern crate service_bus;
+extern crate intercom;
 
 #[derive(Clone, Debug)]
 pub struct DataPoint {
@@ -22,7 +22,7 @@ pub struct DataSeries {
 
 pub struct Dispatcher {
     sqlite_pool: Arc<SqlitePool>,
-    service_bus: Arc<service_bus::ServiceBus>,
+    service_bus: Arc<intercom::ServiceBus>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,13 +44,14 @@ pub enum DispatchStrategy {
 
 struct DBDataPoint {
     timestamp: DateTime<Utc>,
+    // TODO: use a more generic type
     value: f64,
 }
 
 impl Dispatcher {
     pub async fn new(
         sqlite_pool: Arc<SqlitePool>,
-        service_bus: Arc<service_bus::ServiceBus>,
+        service_bus: Arc<intercom::ServiceBus>,
     ) -> Result<Self> {
         // create the dispatcher
         Ok(Dispatcher {
@@ -78,7 +79,7 @@ impl Dispatcher {
         Ok(())
     }
 
-    async fn save_dataseries(&self, dataseries: &DataSeries) -> Result<()> {
+    async fn save_dataseries_old(&self, dataseries: &DataSeries) -> Result<()> {
         info!("saving dataseries of id {:?}", dataseries.dataseries_id);
 
         // save the dataseries to the database
@@ -102,12 +103,10 @@ impl Dispatcher {
         info!("saving datapoints to database");
         for data_point in dataseries.values.iter() {
             debug!("saving datapoint {:?}", data_point);
-            sqlx::query(
-                r#"
+            sqlx::query(r#"
                 INSERT INTO DataPoint (dataseries_id, timestamp, value, created_at)
                 VALUES (?, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'));
-                "#,
-            )
+            "#,)
             .bind(dataseries_id)
             .bind(data_point.timestamp.timestamp())
             .bind(data_point.value)
@@ -119,6 +118,57 @@ impl Dispatcher {
 
         Ok(())
     }
+
+    async fn save_dataseries(&self, dataseries: &DataSeries) -> Result<()> {
+        // this time we will save as much as possible in a single statement
+        info!("saving dataseries of id {:?}", dataseries.dataseries_id);
+
+        // save the dataseries to the database
+        info!("fetching database connection");
+        let mut executor = self.sqlite_pool.begin().await?;
+        info!("saving dataseries to database");
+        let res = sqlx::query(
+            r#"
+            INSERT INTO DataSeries (external_id, created_at)
+            VALUES (?, DATE('now'))
+            ON CONFLICT (external_id) DO UPDATE SET updated_at = DATE('now')
+            RETURNING id;
+            "#,
+        )
+        .bind(dataseries.dataseries_id.to_string())
+        .fetch_one(&mut *executor)
+        .await?;
+        let dataseries_id: i32 = res.try_get("id")?;
+        debug!("dataseries_id: {:?}", dataseries_id);
+
+        info!("saving datapoints to database");
+        let mut values = String::new();
+        for data_point in dataseries.values.iter() {
+            debug!("saving datapoint {:?}", data_point);
+            // TODO: not use string concatenation and use bind parameters
+            values.push_str(&format!(
+                "({}, {}, {}, STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')),",
+                dataseries_id,
+                data_point.timestamp.timestamp_millis(),
+                data_point.value
+            ));
+        }
+        values.pop(); // remove the trailing comma
+        sqlx::query(&format!(
+            r#"
+            INSERT INTO DataPoint (dataseries_id, timestamp, value, created_at)
+            VALUES {};
+            "#,
+            values
+        ))
+        .execute(&mut *executor)
+        .await?;
+        info!("committing transaction");
+        executor.commit().await?;
+
+        Ok(())
+    }
+
 
     async fn send_dataseries(&self, dataseries_id: &Uuid) -> Result<()> {
         info!("sending dataseries of id {:?}", dataseries_id);
@@ -140,24 +190,23 @@ impl Dispatcher {
         debug!("dataseries_id: {:?}", dataseries_id);
 
         info!("fetching datapoints from database");
-        let mut rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
-            r#"
-                SELECT "timestamp", "value"
-                FROM DataPoint
-                WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?)
-                AND sent_at IS NULL
-                ORDER BY timestamp ASC;
-            "#,
-        )
+        let mut rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(r#"
+            SELECT "timestamp", "value"
+            FROM DataPoint
+            WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?)
+            AND sent_at IS NULL
+            ORDER BY timestamp ASC;
+        "#,)
         .bind(dataseries_id.clone())
         .fetch_all(&mut *executor)
         .await
         .context("failed to fetch datapoints from database")?;
 
-        debug!("rows length: {}", rows.len());
+        debug!("fetched {:?} rows", rows.len());
 
         let mut datapoints: Vec<DBDataPoint> = Vec::new();
 
+        info!("transforming rows into datapoints");
         for row in rows.drain(..) {
             let timestamp: i64 = row
                 .try_get("timestamp")
@@ -174,12 +223,12 @@ impl Dispatcher {
         info!("datapoints length: {}", datapoints.len());
         // TODO: break this into a separate function
         let buffer: Vec<u8> = {
-            let mut message = service_bus::capnp::message::Builder::new_default();
+            let mut message = intercom::capnp::message::Builder::new_default();
             let mut dataseries =
-                message.init_root::<service_bus::schemas::persistor_capnp::data_series::Builder>();
+                message.init_root::<intercom::schemas::persistor_capnp::persist_data_series::Builder>();
             dataseries.set_id(&dataseries_id.to_string());
             dataseries
-                .set_type(service_bus::schemas::persistor_capnp::data_series::DataType::Numerical);
+                .set_type(intercom::schemas::persistor_capnp::persist_data_series::DataType::Numerical);
             let mut datapoints_builder = dataseries.init_values(datapoints.len() as u32);
             for (i, datapoint) in datapoints.iter().enumerate() {
                 let mut datapoint_builder = datapoints_builder.reborrow().get(i as u32);
@@ -188,7 +237,7 @@ impl Dispatcher {
             }
 
             let mut buffer = Vec::new();
-            service_bus::capnp::serialize::write_message(&mut buffer, &message)
+            intercom::capnp::serialize::write_message(&mut buffer, &message)
                 .context("failed to serialize message")?;
 
             buffer
@@ -202,13 +251,11 @@ impl Dispatcher {
         info!("dataseries sent to service bus");
 
         info!("marking datapoints as sent");
-        sqlx::query(
-            r#"
-                UPDATE DataPoint
-                SET sent_at = DATE('now')
-                WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?);
-            "#,
-        )
+        sqlx::query(r#"
+            UPDATE DataPoint
+            SET sent_at = DATE('now')
+            WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?);
+        "#,)
         .bind(dataseries_id)
         .execute(&mut *executor)
         .await

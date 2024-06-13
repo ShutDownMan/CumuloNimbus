@@ -2,8 +2,7 @@
 .vscode
 .venv
 .sqlx
-services/service-bus/lib
-services/service-bus/rabbitmq
+services/intercom/lib
 target
 Cargo.lock
 services/ingestor-rs/db

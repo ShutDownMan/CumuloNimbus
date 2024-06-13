@@ -1,5 +1,3 @@
-version: '2.2'
-
 services:
   mosquitto:
     restart: unless-stopped
@@ -24,6 +22,7 @@ services:
       - BROKER_HOST=${BROKER_HOST}
       - BROKER_PORT=${BROKER_PORT}
       - INTERVAL_SECONDS=${INTERVAL_SECONDS}
+      - PYTHONUNBUFFERED=1
     depends_on:
       - mosquitto
     logging:
@@ -34,23 +33,20 @@ services:
         labels: "production_status"
         env: "os"
 
-  service-bus:
+  intercom:
     image: rabbitmq:3-management
     restart: unless-stopped
     ports:
-      - "5672:${RABBITMQ_NODE_PORT}"
-      - "15691:15691"
-      - "15692:15692"
-      - "15671:15671"
-      - "15672:15672"
-      - "4369:4369"
+      - '15672:15672'
+      - '5671:5671'
+      - '5672:5672'
     environment:
-      - RABBITMQ_NODE_PORT=${RABBITMQ_NODE_PORT}
       - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+      - RABBITMQ_PLUGINS="rabbitmq_management"
     volumes:
-      - ./services/service-bus/lib/rabbitmq:/var/lib/rabbitmq
-      - ./services/service-bus/rabbitmq/etc:/etc/rabbitmq
+      - ./services/intercom/lib/rabbitmq:/var/lib/rabbitmq
+      - ./services/intercom/rabbitmq/etc:/etc/rabbitmq
     logging:
       driver: "json-file"
       options:
