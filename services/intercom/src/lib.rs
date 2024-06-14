@@ -44,13 +44,21 @@ impl ServiceBus {
     pub async fn simple_queue_declare(&self, queue_name: &str, routing_key: &str) -> Result<()> {
         info!("declaring queue {}", queue_name);
 
-        // set priority to 2
         let mut fields = FieldTable::default();
         fields.insert("x-max-priority".into(), 2.into());
+
+        let queue_declare_options = QueueDeclareOptions {
+            durable: true,
+            exclusive: false,
+            auto_delete: false,
+            nowait: false,
+            passive: false,
+        };
+
         self.channel
             .queue_declare(
                 queue_name,
-                QueueDeclareOptions::default(),
+                queue_declare_options,
                 fields,
             )
             .await?;
