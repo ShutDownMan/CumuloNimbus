@@ -12,6 +12,13 @@ use tracing::{debug, info};
 pub use capnp;
 pub mod schemas;
 
+#[derive(Debug)]
+pub enum MessagePriority {
+    Alpha = 2,
+    Beta = 1,
+    Omega = 0,
+}
+
 pub struct ServiceBus {
     _connection: Connection,
     channel: Channel,
@@ -37,14 +44,24 @@ impl ServiceBus {
     pub async fn simple_queue_declare(&self, queue_name: &str, routing_key: &str) -> Result<()> {
         info!("declaring queue {}", queue_name);
 
+        let mut fields = FieldTable::default();
+        fields.insert("x-max-priority".into(), 2.into());
+
+        let queue_declare_options = QueueDeclareOptions {
+            durable: true,
+            exclusive: false,
+            auto_delete: false,
+            nowait: false,
+            passive: false,
+        };
+
         self.channel
             .queue_declare(
                 queue_name,
-                QueueDeclareOptions::default(),
-                FieldTable::default(),
+                queue_declare_options,
+                fields,
             )
-            .await
-            .expect("error on queue declare");
+            .await?;
 
         info!("Declared queue");
 
@@ -58,8 +75,7 @@ impl ServiceBus {
                 QueueBindOptions::default(),
                 FieldTable::default(),
             )
-            .await
-            .expect("error on queue bind");
+            .await?;
 
         info!("Bound queue");
 
@@ -96,7 +112,9 @@ impl ServiceBus {
                 queue_name,
                 BasicPublishOptions::default(),
                 message,
-                BasicProperties::default().with_delivery_mode(2),
+                BasicProperties::default()
+                    .with_delivery_mode(2)
+                    .with_priority(0),
             )
             .await?
             .await?;
@@ -113,10 +131,11 @@ impl ServiceBus {
         routing_key: &str,
         message: &[u8],
         compress: bool,
+        priority: Option<MessagePriority>,
     ) -> Result<()> {
         info!("publishing message to queue {}", routing_key);
 
-        debug!("message length: {}", message.len());
+        debug!("raw message length: {}", message.len());
         let mut properties =
             BasicProperties::default().with_content_type("application/capnp".into());
 
@@ -127,9 +146,13 @@ impl ServiceBus {
             message.to_vec()
         };
 
-        debug!("compressed message length: {}", message.len());
+        if compress {
+            debug!("compressed message length: {}", message.len());
+        } else {
+            debug!("uncompressed message length: {}", message.len());
+        }
 
-        // let message: &[u8] = message;
+        properties = properties.with_priority(priority.unwrap_or(MessagePriority::Omega) as u8);
 
         let confirm = self
             .channel
@@ -140,10 +163,7 @@ impl ServiceBus {
                 &message,
                 properties,
             )
-            .await?
             .await?;
-
-        assert_eq!(confirm, Confirmation::NotRequested);
 
         Ok(())
     }

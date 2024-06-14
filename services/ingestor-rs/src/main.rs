@@ -4,24 +4,36 @@ use sqlx::{migrate::MigrateDatabase, migrate::Migrator, Sqlite};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 extern crate dispatcher;
 extern crate mqtt_ingestor;
-extern crate service_bus;
+extern crate intercom;
 
 const DB_URL: &str = "sqlite://./db/ingestor.db";
 
+/**
+* Main function to start the ingestor service.
+* this service is responsible for collecting data from the MQTT broker, persisting it locally to the database and
+* dispatching it to the service bus for further processing/analysis.
+*/
 #[tokio::main]
 async fn main() -> Result<()> {
+    info!("Starting Ingestor Service");
     // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_env("LOG_LEVEL"))
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .init();
 
     let sqlite_pool = Arc::new(init_sqlite_pool().await?);
 
     let service_bus = Arc::new(init_service_bus().await?);
 
+    // TODO: move this to consumer service
     service_bus
-        .simple_queue_declare("persist-dataseries.queue", "persist-dataseries")
+        .simple_queue_declare("persistor.input", "persist-dataseries")
         .await?;
 
     let mqtt_ingestor = init_mqtt_ingestor(sqlite_pool, service_bus).await?;
@@ -62,8 +74,8 @@ async fn init_sqlite_pool() -> Result<SqlitePool> {
     Ok(sqlite_pool)
 }
 
-async fn init_service_bus() -> Result<service_bus::ServiceBus> {
-    let service_bus = service_bus::ServiceBus::new().await;
+async fn init_service_bus() -> Result<intercom::ServiceBus> {
+    let service_bus = intercom::ServiceBus::new().await;
     if let Err(e) = service_bus {
         error!("service bus initialize failed: {:?}", e);
         return Err(e);
@@ -75,7 +87,7 @@ async fn init_service_bus() -> Result<service_bus::ServiceBus> {
 
 async fn init_mqtt_ingestor(
     sqlite_pool: Arc<SqlitePool>,
-    service_bus: Arc<service_bus::ServiceBus>,
+    service_bus: Arc<intercom::ServiceBus>,
 ) -> Result<mqtt_ingestor::MqttIngestor> {
     let mqtt_connector_config = mqtt_ingestor::MqttConnectorConfig {
         mqtt_options: mqtt_ingestor::MqttConnectionOptions {
@@ -112,9 +124,9 @@ async fn init_mqtt_ingestor(
     let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
         dispatch_strategy: dispatcher::DispatchStrategy::Batched {
             trigger: dispatcher::DispatchTriggerType::Interval {
-                interval: std::time::Duration::from_secs(60),
+                interval: std::time::Duration::from_secs(30),
             },
-            max_batch: 100,
+            max_batch: 600,
         },
     };
     let dispatcher = dispatcher::Dispatcher::new(sqlite_pool.clone(), service_bus.clone()).await;

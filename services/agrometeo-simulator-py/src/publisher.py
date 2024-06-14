@@ -45,10 +45,14 @@ def main():
     Returns:
         None
     """
+    print("Starting Agrometeo Simulator...")
+
+    print(f"Connecting to a broker at {broker_host}:{broker_port}...")
     # connect to a broker
     client = mqtt.Client(client_id="agrometeo-simulator-py", clean_session=True,
                          userdata=None, protocol=mqtt.MQTTv311, transport="tcp")
     client.connect(broker_host, broker_port, 60)
+    print("Connected to broker.")
     client.loop_start()
 
     # generate noise for each station/sensor/magnitude combination

@@ -225,6 +225,11 @@ impl MqttIngestor {
 
                 // check if the dataseries is already in the buffer
                 if let Some(dataseries_buffer) = dataseries_buffer.get_mut(&dataseries_uuid) {
+                    debug!(
+                        "dataseries {} buffer length: {}",
+                        dataseries_uuid,
+                        dataseries_buffer.len()
+                    );
                     let should_dispatch = check_dispatch_trigger(
                         dataseries_buffer,
                         dispatch_strategy,
@@ -269,10 +274,9 @@ impl MqttIngestor {
             };
 
             // dispatch the dataseries
-            dispatcher
-                .dispatch(&dataseries)
-                .await
-                .context("mqtt dispatch failed")?;
+            if let Err(e) = dispatcher.dispatch(&dataseries).await {
+                error!("mqtt dispatch failed: {}", e);
+            }
 
             debug!("mqtt dispatched dataseries: {}", dataseries_uuid);
 
@@ -307,6 +311,7 @@ async fn check_dispatch_trigger(
     dataseries_uuid: &Uuid,
 ) -> bool {
     let mut should_dispatch = false;
+    debug!("checking dispatch trigger for dataseries {}", dataseries_uuid);
     // check if dispatch strategy is set to batch
     match dispatch_strategy {
         dispatcher::DispatchStrategy::Batched { max_batch, trigger } => {
@@ -314,12 +319,6 @@ async fn check_dispatch_trigger(
             if dataseries_buffer.len() >= *max_batch {
                 should_dispatch = true;
                 debug!("should dispatch batched dataseries {}", dataseries_uuid);
-            } else {
-                debug!(
-                    "not enough datapoints {} for dataseries {}",
-                    dataseries_buffer.len(),
-                    dataseries_uuid
-                );
             }
 
             // check if holdoff time is reached
