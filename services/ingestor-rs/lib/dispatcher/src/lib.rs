@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::prelude::*;
+use intercom::{MessagePriority, ServiceBus};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 use std::sync::Arc;
@@ -67,54 +68,10 @@ impl Dispatcher {
         );
 
         // save the dataseries to the database
-        self.save_dataseries(dataseries)
-            .await
-            .context("failed to save dataseries")?;
+        self.save_dataseries(dataseries).await?;
 
         // send the dataseries to the service_bus
-        self.send_dataseries(&dataseries.dataseries_id)
-            .await
-            .context("failed to send dataseries")?;
-
-        Ok(())
-    }
-
-    async fn save_dataseries_old(&self, dataseries: &DataSeries) -> Result<()> {
-        info!("saving dataseries of id {:?}", dataseries.dataseries_id);
-
-        // save the dataseries to the database
-        info!("fetching database connection");
-        let mut executor = self.sqlite_pool.begin().await?;
-        info!("saving dataseries to database");
-        let res = sqlx::query(
-            r#"
-            INSERT INTO DataSeries (external_id, created_at)
-            VALUES (?, DATE('now'))
-            ON CONFLICT (external_id) DO UPDATE SET updated_at = DATE('now')
-            RETURNING id;
-            "#,
-        )
-        .bind(dataseries.dataseries_id.to_string())
-        .fetch_one(&mut *executor)
-        .await?;
-        let dataseries_id: i32 = res.try_get("id")?;
-        debug!("dataseries_id: {:?}", dataseries_id);
-
-        info!("saving datapoints to database");
-        for data_point in dataseries.values.iter() {
-            debug!("saving datapoint {:?}", data_point);
-            sqlx::query(r#"
-                INSERT INTO DataPoint (dataseries_id, timestamp, value, created_at)
-                VALUES (?, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'));
-            "#,)
-            .bind(dataseries_id)
-            .bind(data_point.timestamp.timestamp())
-            .bind(data_point.value)
-            .execute(&mut *executor)
-            .await?;
-        }
-        info!("committing transaction");
-        executor.commit().await?;
+        self.send_dataseries(&dataseries.dataseries_id).await?;
 
         Ok(())
     }
@@ -184,8 +141,7 @@ impl Dispatcher {
         )
         .bind(dataseries_id.to_string())
         .fetch_one(&mut *executor)
-        .await
-        .context("failed to fetch dataseries from database")?;
+        .await?;
         let dataseries_id: String = res.try_get("external_id")?;
         debug!("dataseries_id: {:?}", dataseries_id);
 
@@ -199,8 +155,7 @@ impl Dispatcher {
         "#,)
         .bind(dataseries_id.clone())
         .fetch_all(&mut *executor)
-        .await
-        .context("failed to fetch datapoints from database")?;
+        .await?;
 
         debug!("fetched {:?} rows", rows.len());
 
@@ -209,9 +164,8 @@ impl Dispatcher {
         info!("transforming rows into datapoints");
         for row in rows.drain(..) {
             let timestamp: i64 = row
-                .try_get("timestamp")
-                .context("failed to get timestamp")?;
-            let value: f64 = row.try_get("value").context("failed to get value")?;
+                .try_get("timestamp")?;
+            let value: f64 = row.try_get("value")?;
             if let Some(timestamp) = Utc.timestamp_opt(timestamp, 0).single() {
                 datapoints.push(DBDataPoint { timestamp, value });
             } else {
@@ -219,14 +173,38 @@ impl Dispatcher {
             }
         }
 
+        info!("datapoints count: {}", datapoints.len());
+        self.publish_dataseries(dataseries_id.clone(), datapoints).await?;
+
+        info!("marking datapoints as sent");
+        sqlx::query(r#"
+            UPDATE DataPoint
+            SET sent_at = DATE('now')
+            WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?);
+        "#,)
+        .bind(dataseries_id)
+        .execute(&mut *executor)
+        .await?;
+
+        info!("committing transaction");
+        executor.commit().await?;
+
+        Ok(())
+    }
+
+    async fn publish_dataseries(
+        &self,
+        dataseries_id: String,
+        datapoints: Vec<DBDataPoint>,
+    ) -> Result<()> {
         info!("transforming dataseries into bytearray with capnp");
-        info!("datapoints length: {}", datapoints.len());
-        // TODO: break this into a separate function
+        info!("publishing dataseries to service bus");
+
         let buffer: Vec<u8> = {
             let mut message = intercom::capnp::message::Builder::new_default();
             let mut dataseries =
                 message.init_root::<intercom::schemas::persistor_capnp::persist_data_series::Builder>();
-            dataseries.set_id(&dataseries_id.to_string());
+            dataseries.set_id(&dataseries_id);
             dataseries
                 .set_type(intercom::schemas::persistor_capnp::persist_data_series::DataType::Numerical);
             let mut datapoints_builder = dataseries.init_values(datapoints.len() as u32);
@@ -237,32 +215,20 @@ impl Dispatcher {
             }
 
             let mut buffer = Vec::new();
-            intercom::capnp::serialize::write_message(&mut buffer, &message)
-                .context("failed to serialize message")?;
+            intercom::capnp::serialize::write_message(&mut buffer, &message)?;
 
             buffer
         };
 
-        info!("sending dataseries to service bus");
-        self.service_bus
-            .capnp_publish_message("amq.direct", "persist-dataseries", &buffer, true)
-            .await
-            .context("failed to send message to service bus")?;
+        info!("attempting to send dataseries to service bus");
+        let publish_status = self.service_bus
+            .capnp_publish_message("amq.direct", "persist-dataseries", &buffer, true, MessagePriority::Beta.into())
+            .await;
+        if let Err(e) = publish_status {
+            error!("failed to send dataseries to service bus: {:?}", e);
+            return Err(e);
+        }
         info!("dataseries sent to service bus");
-
-        info!("marking datapoints as sent");
-        sqlx::query(r#"
-            UPDATE DataPoint
-            SET sent_at = DATE('now')
-            WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?);
-        "#,)
-        .bind(dataseries_id)
-        .execute(&mut *executor)
-        .await
-        .context("failed to mark datapoints as sent")?;
-
-        info!("committing transaction");
-        executor.commit().await?;
 
         Ok(())
     }

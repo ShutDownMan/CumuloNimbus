@@ -19,6 +19,7 @@ const DB_URL: &str = "sqlite://./db/ingestor.db";
 */
 #[tokio::main]
 async fn main() -> Result<()> {
+    info!("Starting Ingestor Service");
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_env("LOG_LEVEL"))
@@ -30,8 +31,9 @@ async fn main() -> Result<()> {
 
     let service_bus = Arc::new(init_service_bus().await?);
 
+    // TODO: move this to consumer service
     service_bus
-        .simple_queue_declare("persist-dataseries.queue", "persist-dataseries")
+        .simple_queue_declare("persistor.input", "persist-dataseries")
         .await?;
 
     let mqtt_ingestor = init_mqtt_ingestor(sqlite_pool, service_bus).await?;
@@ -122,9 +124,9 @@ async fn init_mqtt_ingestor(
     let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
         dispatch_strategy: dispatcher::DispatchStrategy::Batched {
             trigger: dispatcher::DispatchTriggerType::Interval {
-                interval: std::time::Duration::from_secs(60),
+                interval: std::time::Duration::from_secs(30),
             },
-            max_batch: 100,
+            max_batch: 600,
         },
     };
     let dispatcher = dispatcher::Dispatcher::new(sqlite_pool.clone(), service_bus.clone()).await;
