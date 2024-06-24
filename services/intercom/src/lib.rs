@@ -1,16 +1,21 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use futures_lite::stream::StreamExt;
 use lapin::{
     options::*, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Channel,
-    Connection, ConnectionProperties,
+    Connection, ConnectionProperties, Consumer,
 };
-use std::io::prelude::*;
+use std::{future::IntoFuture, io::prelude::*, sync::{Arc, Mutex}};
 use tracing::{debug, info};
+use std::collections::HashMap;
 
-pub use capnp;
+
 pub mod schemas;
+
+// pub use capnp;
+// pub use lapin;
+pub use capnp::serialize;
 
 #[derive(Debug)]
 pub enum MessagePriority {
@@ -19,9 +24,36 @@ pub enum MessagePriority {
     Omega = 0,
 }
 
+// TODO: Find a way to create this enum dynamically
+#[derive(Debug, Eq, Hash, PartialEq)]
+pub enum MessageType {
+    PersistDataSeries,
+    FetchDataSeries
+}
+
+pub type CapnpBuilder<A> = capnp::message::Builder<A>;
+pub type CapnpSegmentReader<'a> = capnp::message::Reader<capnp::serialize::SliceSegments<'a>>;
+pub type LapinAMQPProperties = lapin::protocol::basic::AMQPProperties;
+
+type MessageHandlerCallbackType = fn(
+    CapnpSegmentReader,
+    LapinAMQPProperties
+) -> Result<()>;
+
+#[derive(Debug)]
+struct MessageTypeCallback {
+    message_type: MessageType,
+    callback: MessageHandlerCallbackType
+}
+
+#[derive(Debug)]
 pub struct ServiceBus {
     _connection: Connection,
     channel: Channel,
+    subscriptions: Arc<Mutex<HashMap<
+        String,
+        HashMap<MessageType, MessageHandlerCallbackType>
+    >>>
 }
 
 impl ServiceBus {
@@ -35,9 +67,12 @@ impl ServiceBus {
 
         let channel = connection.create_channel().await?;
 
+        let subscriptions = Arc::new(Mutex::new(HashMap::new()));
+
         Ok(ServiceBus {
             _connection: connection,
             channel,
+            subscriptions,
         })
     }
 
@@ -125,10 +160,11 @@ impl ServiceBus {
     }
 
     // publish message with capnp
-    pub async fn capnp_publish_message(
+    pub async fn intercom_publish(
         &self,
         exchange: &str,
         routing_key: &str,
+        message_type: MessageType,
         message: &[u8],
         compress: bool,
         priority: Option<MessagePriority>,
@@ -136,8 +172,13 @@ impl ServiceBus {
         info!("publishing message to queue {}", routing_key);
 
         debug!("raw message length: {}", message.len());
-        let mut properties =
-            BasicProperties::default().with_content_type("application/capnp".into());
+        let mut properties = BasicProperties::default();
+        let mut headers = FieldTable::default();
+
+        headers.insert("message-type".into(), (message_type as u32).into());
+
+        properties = properties.with_headers(headers)
+            .with_content_type("application/capnp".into());
 
         let message = if compress {
             properties = properties.with_content_encoding("gzip".into());
@@ -174,6 +215,74 @@ impl ServiceBus {
         let compressed_bytes = encoder.finish()?;
         Ok(compressed_bytes)
     }
+
+    pub fn subscribe(&self, topic: &str, message_type: MessageType, callback: MessageHandlerCallbackType) -> Result<()>
+    {
+        let m_topic: String = topic.to_string();
+        let m_subscriptions = self.subscriptions.clone();
+        let result = std::thread::spawn(move || {
+            let mut subs = m_subscriptions.lock().unwrap();
+
+            // check if exists in hashmap
+            if let Some(existing_subs) = subs.get_mut(&m_topic) {
+                // if exists, insert into the existing hashmap
+                existing_subs.insert(message_type, callback);
+            } else {
+                // if does not exist, create new entry
+                subs.insert(m_topic.clone(), HashMap::from([(message_type, callback)]));
+            }
+        }).join();
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(_) => bail!("Could not subscribe to topic {:?}", topic)
+        }
+    }
+
+    pub async fn listen_forever(&self) -> Result<()> {
+        let channel = self._connection.create_channel().await?;
+        let m_subscriptions = self.subscriptions.clone();
+
+        let result = std::thread::spawn(move || {
+            let subs = m_subscriptions.lock().unwrap();
+
+            let mut consumers = Vec::new();
+            for topic in subs.keys() {
+                consumers.push(async {channel.basic_consume(
+                    topic,
+                    "my_consumer",
+                    BasicConsumeOptions::default(),
+                    FieldTable::default(),
+                ).await});
+            }
+
+            let mut consumers = consumers.into_iter()
+                .map(|c| async_global_executor::block_on(c.into_future()))
+                .map(|c| c.unwrap())
+                .collect::<Vec<Consumer>>();
+
+            async_global_executor::block_on(async move {
+                let tasks = consumers.into_iter()
+                    .map(|mut c| async_global_executor::spawn(async move {
+                        while let Some(delivery) = c.next().await {
+                            let delivery = delivery.expect("error in consumer");
+                            delivery.ack(BasicAckOptions::default()).await.expect("ack");
+                        }
+                    }))
+                    .collect::<Vec<async_global_executor::Task<()>>>();
+
+                    futures::future::join_all(tasks).await;
+                }
+            );
+
+        }).join();
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(_) => bail!("Error when listening to messages")
+        }
+    }
+
 }
 
 pub async fn amqp_main() -> Result<()> {

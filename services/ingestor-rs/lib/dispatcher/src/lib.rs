@@ -201,7 +201,7 @@ impl Dispatcher {
         info!("publishing dataseries to service bus");
 
         let buffer: Vec<u8> = {
-            let mut message = intercom::capnp::message::Builder::new_default();
+            let mut message = intercom::CapnpBuilder::new_default();
             let mut dataseries =
                 message.init_root::<intercom::schemas::persistor_capnp::persist_data_series::Builder>();
             dataseries.set_id(&dataseries_id);
@@ -215,14 +215,16 @@ impl Dispatcher {
             }
 
             let mut buffer = Vec::new();
-            intercom::capnp::serialize::write_message(&mut buffer, &message)?;
+            intercom::serialize::write_message(&mut buffer, &message)?;
 
             buffer
         };
 
         info!("attempting to send dataseries to service bus");
         let publish_status = self.service_bus
-            .capnp_publish_message("amq.direct", "persist-dataseries", &buffer, true, MessagePriority::Beta.into())
+            .intercom_publish("amq.direct", "persist-dataseries",
+            intercom::MessageType::PersistDataSeries, &buffer, true,
+            MessagePriority::Beta.into())
             .await;
         if let Err(e) = publish_status {
             error!("failed to send dataseries to service bus: {:?}", e);

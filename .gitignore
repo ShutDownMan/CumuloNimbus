@@ -6,3 +6,4 @@ services/intercom/lib
 target
 Cargo.lock
 services/ingestor-rs/db
+intercom/lib
