@@ -1,9 +1,7 @@
 use anyhow::Result;
-use intercom::schemas::persistor_capnp::fetch_data_series;
 use sqlx::postgres::PgPool;
 use std::sync::Arc;
-use tracing::{error, debug, info};
-use tracing_subscriber::EnvFilter;
+use tracing::{debug};
 
 extern crate intercom;
 
@@ -42,6 +40,12 @@ impl DataKeeper {
     ) -> Result<()> {
         let root = reader.get_root::<schemas::persistor_capnp::persist_data_series::Reader>()?;
         debug!("Id: {:?}", root.get_id()?);
+        debug!("Type: {:?}", root.get_type()?);
+
+        for value in root.get_values()? {
+            debug!("Timestamp: {:?}", value.get_timestamp());
+            debug!("Data: {:?}", value.get_data());
+        }
 
         Ok(())
     }

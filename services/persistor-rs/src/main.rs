@@ -51,6 +51,8 @@ async fn init_timescale_pool() -> Result<PgPool> {
         .unwrap_or("5".into())
         .parse::<u32>()?;
 
+    debug!("{:#?}", db_url);
+
     info!("checking if database exists");
     if !Postgres::database_exists(db_url.as_str()).await.unwrap_or(false) {
         info!("creating database {}", db_url);
