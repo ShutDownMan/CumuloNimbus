@@ -61,17 +61,17 @@ impl Dispatcher {
         })
     }
 
-    pub async fn dispatch(&self, dataseries: &DataSeries) -> Result<()> {
+    pub fn dispatch(&self, dataseries: &DataSeries) -> Result<()> {
         debug!(
             "dispatching dataseries of id {:?}",
             dataseries.dataseries_id
         );
 
         // save the dataseries to the database
-        self.save_dataseries(dataseries).await?;
+        async_global_executor::block_on(self.save_dataseries(dataseries))?;
 
         // send the dataseries to the service_bus
-        self.send_dataseries(&dataseries.dataseries_id).await?;
+        async_global_executor::block_on(self.send_dataseries(&dataseries.dataseries_id))?;
 
         Ok(())
     }
@@ -151,11 +151,16 @@ impl Dispatcher {
             FROM DataPoint
             WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?)
             AND sent_at IS NULL
-            ORDER BY timestamp ASC;
+            ORDER BY timestamp ASC
+            LIMIT ?;
         "#,)
         .bind(dataseries_id.clone())
+        // TODO: parameterize limit
+        .bind(1000)
         .fetch_all(&mut *executor)
         .await?;
+
+        // TODO: check if should send again
 
         debug!("fetched {:?} rows", rows.len());
 
@@ -179,7 +184,7 @@ impl Dispatcher {
         info!("marking datapoints as sent");
         sqlx::query(r#"
             UPDATE DataPoint
-            SET sent_at = DATE('now')
+            SET sent_at = CURRENT_TIMESTAMP
             WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?);
         "#,)
         .bind(dataseries_id)
@@ -188,6 +193,7 @@ impl Dispatcher {
 
         info!("committing transaction");
         executor.commit().await?;
+        info!("transaction committed");
 
         Ok(())
     }
