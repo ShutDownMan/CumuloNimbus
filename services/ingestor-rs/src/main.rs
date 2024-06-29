@@ -1,8 +1,8 @@
 use anyhow::Result;
-use sqlx::sqlite::SqlitePool;
+use sqlx::sqlite::{SqlitePoolOptions, SqlitePool};
 use sqlx::{migrate::MigrateDatabase, migrate::Migrator, Sqlite};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -56,9 +56,12 @@ async fn init_sqlite_pool() -> Result<SqlitePool> {
 
     // initialize the database
     info!("initializing database");
-    let sqlite_pool = SqlitePool::connect(DB_URL)
-        .await
-        .expect("failed to connect to sqlite");
+    let sqlite_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(DB_URL)
+        .await?;
 
     // run migrations
     info!("running migrations");
@@ -138,7 +141,7 @@ async fn init_mqtt_ingestor(
     let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
         dispatch_strategy: dispatcher::DispatchStrategy::Batched {
             trigger: dispatcher::DispatchTriggerType::Interval {
-                interval: std::time::Duration::from_secs(30),
+                interval: std::time::Duration::from_secs(5),
             },
             max_batch: 1000,
         },
@@ -148,7 +151,7 @@ async fn init_mqtt_ingestor(
         error!("dispatcher initialize failed: {:?}", e);
         return Err(e);
     }
-    let dispatcher = Arc::new(Mutex::new(dispatcher.unwrap()));
+    let dispatcher = Arc::new(dispatcher.unwrap());
 
     let mut mqtt_ingestor = mqtt_ingestor::MqttIngestor::new(
         mqtt_connector_config,

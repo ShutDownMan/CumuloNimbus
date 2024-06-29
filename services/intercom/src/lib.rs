@@ -2,24 +2,24 @@ use anyhow::{bail, anyhow, Result};
 use flate2::write::ZlibEncoder;
 use flate2::read::ZlibDecoder;
 use flate2::Compression;
+use futures::Future;
 use futures_lite::stream::StreamExt;
 use lapin::{
-    message::Delivery, options::*, publisher_confirm::Confirmation, types::{AMQPValue, FieldTable, ShortString}, BasicProperties, Channel, Connection, ConnectionProperties, Consumer
+    message::Delivery, options::*, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties, Consumer
 };
-use std::{future::IntoFuture, io::prelude::*, sync::{Arc, Mutex}};
-use tracing::{debug, info, warn};
+use std::{io::prelude::*, sync::{Arc, Mutex}};
+use tracing::{debug, error, info, warn};
 use std::collections::HashMap;
-use capnp::message::{ReaderOptions, Reader};
+use capnp::message::ReaderOptions;
 
 extern crate num;
+
 #[macro_use]
 extern crate num_derive;
 
 pub mod schemas;
 
-// pub use capnp;
-// pub use lapin;
-pub use capnp::serialize;
+pub use capnp::serialize_packed;
 
 #[derive(Debug)]
 pub enum MessagePriority {
@@ -36,17 +36,13 @@ pub enum MessageType {
 }
 
 pub type CapnpBuilder<A> = capnp::message::Builder<A>;
-pub type CapnpSegmentReader<'a> = capnp::message::Reader<capnp::serialize::SliceSegments<'a>>;
+pub type CapnpReader = capnp::message::Reader<capnp::serialize::OwnedSegments>;
 pub type LapinAMQPProperties = lapin::protocol::basic::AMQPProperties;
 
 type SubscriberType = Arc<Mutex<HashMap<String, HashMap<MessageType, MessageHandlerCallbackType>>>>;
 
-type MessageHandlerCallbackType = fn(
-    CapnpSegmentReader,
-    LapinAMQPProperties
-) -> Result<()>;
+type MessageHandlerCallbackType = Box<dyn Fn(CapnpReader, LapinAMQPProperties) -> Result<()> + Send + 'static>;
 
-#[derive(Debug)]
 pub struct ServiceBus {
     _connection: Connection,
     channel: Channel,
@@ -58,7 +54,9 @@ impl ServiceBus {
         let addr = std::env::var("SERVICE_BUS_ADDRESS")
             .unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
 
-        let connection = Connection::connect(&addr, ConnectionProperties::default()).await?;
+        let connection_properties = ConnectionProperties::default();
+
+        let connection = Connection::connect(&addr, connection_properties).await?;
 
         info!("CONNECTED");
 
@@ -192,7 +190,7 @@ impl ServiceBus {
 
         properties = properties.with_priority(priority.unwrap_or(MessagePriority::Omega) as u8);
 
-        let confirm = self
+        let _confirm = self
             .channel
             .basic_publish(
                 exchange,
@@ -233,119 +231,11 @@ impl ServiceBus {
         let channel = self._connection.create_channel().await?;
         let subscriptions = self.subscriptions.clone();
 
+        channel.basic_qos(1, BasicQosOptions::default()).await?;
+
         let consumers = create_consumers(&channel, &subscriptions).await;
 
         handle_consumers(consumers, subscriptions).await;
-
-        // let result = std::thread::spawn(move || {
-        //     let subs = m_subscriptions.lock().unwrap();
-
-        //     debug!("subs len: {}", subs.len());
-        //     let mut consumers = Vec::new();
-        //     for topic in subs.keys() {
-        //         debug!("Creating consumer for {}", topic);
-        //         consumers.push(async {channel.basic_consume(
-        //             topic,
-        //             "my_consumer",
-        //             BasicConsumeOptions::default(),
-        //             FieldTable::default(),
-        //         ).await});
-        //     }
-
-        //     let consumers = consumers.into_iter()
-        //         .map(|c| async_global_executor::block_on(c.into_future()))
-        //         .map(|c| c.unwrap())
-        //         .collect::<Vec<Consumer>>();
-
-        //     drop(subs);
-
-        //     let m_subscriptions = m_subscriptions.clone();
-        //     // let subs = m_subscriptions.lock().unwrap();
-        //     async_global_executor::block_on(async move {
-        //         let tasks = consumers.into_iter()
-        //             .map(|mut c| {
-        //                 let inner_inner_m_subscriptions = m_subscriptions.clone();
-
-        //                 async_global_executor::spawn(async move {
-        //                     let m_subscriptions = (&inner_inner_m_subscriptions).clone();
-        //                     let topic = c.queue().to_string();
-
-        //                     debug!("listening for messages in topic {}", topic);
-
-        //                     while let Some(delivery) = c.next().await {
-        //                         debug!("received a message");
-
-        //                         let topic = topic.clone();
-        //                         let m_subscriptions = (&m_subscriptions).clone();
-        //                         match delivery {
-        //                             Ok(delivery) => {
-        //                                 let properties = delivery.properties.clone();
-        //                                 let dbg_headers = properties.clone().headers().clone().map(|h| format!("{:?}", h)).unwrap_or("No headers".to_string());
-        //                                 let dbg_content_type = properties.content_type().clone().map(|ct| format!("{:?}", ct)).unwrap_or("No content type".to_string());
-        //                                 let dbg_delivery_mode = properties.delivery_mode().map(|dm| format!("{:?}", dm)).unwrap_or("No delivery mode".to_string());
-        //                                 let dbg_content_encoding = properties.content_encoding().clone().map(|ce| format!("{:?}", ce)).unwrap_or("No content encoding".to_string());
-        //                                 let dbg_message_id = properties.message_id().clone().map(|id| format!("{:?}", id)).unwrap_or("No message id".to_string());
-        //                                 let dbg_timestamp = properties.timestamp().map(|ts| format!("{:?}", ts)).unwrap_or("No timestamp".to_string());
-        //                                 let dbg_body_length = delivery.data.len();
-
-        //                                 let mut message_type = None;
-
-        //                                 let headers = delivery.properties.headers().clone().unwrap();
-
-        //                                 for header in headers.into_iter() {
-        //                                     let key = header.0.as_str();
-        //                                     let new_header = (key, header.1);
-
-        //                                     match new_header {
-        //                                         ("message-type", value) => message_type = value.as_long_uint(),
-        //                                         _ => ()
-        //                                     }
-        //                                 }
-
-        //                                 let dbg_message_type = message_type.map(|mt| format!("{:?}", mt)).unwrap_or("No message type".to_string());
-
-        //                                 // TODO: check if message is really compressed before decoding
-        //                                 let body = gzip_decode(&delivery.data).await;
-        //                                 if let Ok(body) = body {
-        //                                     let metadata = properties.clone();
-        //                                     let callback_result = std::thread::spawn(move || {
-        //                                         let body_slice = &mut &body[..];
-        //                                         handle_subscription_callback(m_subscriptions.clone(), topic, message_type, body_slice, metadata)
-        //                                     }).join();
-
-        //                                     // TODO: use callback result
-        //                                 }
-
-        //                                 debug!("Message Headers: {}", &dbg_headers);
-        //                                 debug!("Content Type: {}", &dbg_content_type);
-        //                                 debug!("Delivery Mode: {}", &dbg_delivery_mode);
-        //                                 debug!("Content Encoding: {}", &dbg_content_encoding);
-        //                                 debug!("Message ID: {}", &dbg_message_id);
-        //                                 debug!("Message Type: {}", &dbg_message_type);
-        //                                 debug!("Timestamp: {}", &dbg_timestamp);
-        //                                 debug!("Message Body Length: {}", &dbg_body_length);
-
-        //                                 delivery.ack(BasicAckOptions::default()).await.expect("ack");
-        //                             },
-        //                             Err(e) => {
-        //                                 warn!("error in consumer: {:?}", e);
-        //                             }
-        //                         }
-        //                     }
-        //                 })
-        //             })
-        //             .collect::<Vec<async_global_executor::Task<()>>>();
-
-        //             futures::future::join_all(tasks).await;
-        //         }
-        //     );
-
-        // }).join();
-
-        // match result {
-        //     Ok(_) => Ok(()),
-        //     Err(_) => bail!("Error when listening to messages")
-        // }
 
         Ok(())
     }
@@ -386,7 +276,7 @@ async fn handle_consumers(consumers: Vec<Consumer>, subscriptions: SubscriberTyp
                         process_message(delivery, inner_subscriptions.clone(), &topic).await;
                     },
                     Err(e) => {
-                        warn!("error in consumer: {:?}", e);
+                        error!("error in consumer: {:?}", e);
                     }
                 }
             }
@@ -402,6 +292,7 @@ async fn process_message(
     subscriptions: SubscriberType,
     topic: &str,
 ) {
+
     let properties = delivery.properties.clone();
     let dbg_headers = properties.clone().headers().clone().map(|h| format!("{:?}", h)).unwrap_or("No headers".to_string());
     let dbg_content_type = properties.content_type().clone().map(|ct| format!("{:?}", ct)).unwrap_or("No content type".to_string());
@@ -410,6 +301,15 @@ async fn process_message(
     let dbg_message_id = properties.message_id().clone().map(|id| format!("{:?}", id)).unwrap_or("No message id".to_string());
     let dbg_timestamp = properties.timestamp().map(|ts| format!("{:?}", ts)).unwrap_or("No timestamp".to_string());
     let dbg_body_length = delivery.data.len();
+
+    info!("Received message in topic {} | Message ID: {} | Length: {}", topic, dbg_message_id, dbg_body_length);
+    debug!("Message Headers: {}", &dbg_headers);
+    debug!("Content Type: {}", &dbg_content_type);
+    debug!("Delivery Mode: {}", &dbg_delivery_mode);
+    debug!("Content Encoding: {}", &dbg_content_encoding);
+    debug!("Message ID: {}", &dbg_message_id);
+    debug!("Timestamp: {}", &dbg_timestamp);
+    debug!("Message Body Length: {}", &dbg_body_length);
 
     let mut message_type = None;
 
@@ -427,47 +327,61 @@ async fn process_message(
 
     let dbg_message_type = message_type.map(|mt| format!("{:?}", mt)).unwrap_or("No message type".to_string());
 
+    debug!("Message Type: {}", &dbg_message_type);
+
     // TODO: check if message is really compressed before decoding
     let body = gzip_decode(&delivery.data).await;
     if let Ok(body) = body {
         let metadata = properties.clone();
         let topic = topic.to_string();
-        let callback_result = std::thread::spawn(move || {
+        debug!("Handling message");
+        let _callback_result = std::thread::spawn(move || {
             let body_slice = &mut &body[..];
             handle_subscription_callback(subscriptions.clone(), topic, message_type, body_slice, metadata)
         }).join();
 
-        // TODO: use callback result
+        // TODO: send message to dead letter queue if callback fails
+        if let Err(e) = _callback_result {
+            error!("Error handling message: {:?}", e);
+        }
     }
 
-    debug!("Message Headers: {}", &dbg_headers);
-    debug!("Content Type: {}", &dbg_content_type);
-    debug!("Delivery Mode: {}", &dbg_delivery_mode);
-    debug!("Content Encoding: {}", &dbg_content_encoding);
-    debug!("Message ID: {}", &dbg_message_id);
-    debug!("Message Type: {}", &dbg_message_type);
-    debug!("Timestamp: {}", &dbg_timestamp);
-    debug!("Message Body Length: {}", &dbg_body_length);
-
+    debug!("Acking message");
     delivery.ack(BasicAckOptions::default()).await.expect("ack");
+    debug!("Message acked");
 }
 
 fn handle_subscription_callback(
-    subscriptions: Arc<Mutex<HashMap<String, HashMap<MessageType, MessageHandlerCallbackType>>>>,
+    subscriptions: SubscriberType,
     topic: String,
     message_type: Option<u32>,
     body: &mut &[u8],
     metadata: LapinAMQPProperties
 ) -> Result<()> {
-    let locked_subs = subscriptions.lock().map_err(|_| anyhow!("Failed to lock subscriptions"))?;;
+    debug!("Locking subscriptions");
+
+    let locked_subs = subscriptions.lock().map_err(|_| anyhow!("Failed to lock subscriptions"))?;
     let current_topic_subs = locked_subs.get(&topic).ok_or_else(|| anyhow!("Topic not found"))?;
+
+    debug!("Handling message");
 
     let message_type = message_type.and_then(num::FromPrimitive::from_u32).ok_or_else(|| anyhow!("Invalid message type"))?;
     let callback = current_topic_subs.get(&message_type).ok_or_else(|| anyhow!("Message type not found"))?;
 
-    let reader = capnp::serialize::read_message_from_flat_slice(body, ReaderOptions::new())?;
+    debug!("Reading message");
 
-    (callback)(reader, metadata)
+    let reader = capnp::serialize_packed::read_message(body, ReaderOptions::new())?;
+
+    debug!("Invoking callback future");
+    let result = callback(reader, metadata);
+
+    debug!("Callback result: {:?}", result);
+
+    if let Err(e) = result {
+        error!("Error invoking callback: {:?}", e);
+    }
+
+    Ok(())
 }
 
 pub async fn gzip_encode(message: &[u8]) -> Result<Vec<u8>> {
@@ -547,11 +461,11 @@ pub async fn amqp_main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // use super::*;
 
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
+    // #[test]
+    // fn it_works() {
+    //     let result = 2 + 2;
+    //     assert_eq!(result, 4);
+    // }
 }

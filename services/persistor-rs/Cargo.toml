@@ -5,13 +5,13 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.72"
-tokio = { version = "1.29.1", features = ["full"] }
-sqlx = { version = "0.7.1", features = ["postgres", "macros", "runtime-tokio-native-tls"] }
+tokio = { version = "1.37.0", features = ["full"] }
+sqlx = { version = "0.7.1", features = ["postgres", "runtime-tokio-native-tls"] }
 intercom = { path = '../intercom' }
 datakeeper = { path = './lib/datakeeper' }
 tracing = "0.1.37"
 tracing-subscriber = {version = "0.3.17", features=["env-filter"]}
-chrono = "0.4.26"
+chrono = "0.4.38"
 
 [[bin]]
 name = "persistor"

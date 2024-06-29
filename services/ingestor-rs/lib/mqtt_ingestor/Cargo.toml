@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.72"
-chrono = { version = "0.4.26", features = ["time"] }
+chrono = { version = "0.4.38", features = [] }
 rumqttc = "0.22.0"
 tokio = { version = "1.29.1", features = ["full"] }
 uuid = { version = "1.4.1", features = ["v8"] }

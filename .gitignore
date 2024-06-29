@@ -7,3 +7,4 @@ target
 Cargo.lock
 services/ingestor-rs/db
 intercom/lib
+logs/*

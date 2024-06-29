@@ -96,5 +96,5 @@ async fn init_data_keeper(
     postgres_pool: Arc<PgPool>,
     service_bus: Arc<intercom::ServiceBus>,
 ) -> Result<datakeeper::DataKeeper> {
-    DataKeeper::new(postgres_pool, service_bus)
+    DataKeeper::new(postgres_pool, service_bus, tokio::runtime::Handle::current())
 }

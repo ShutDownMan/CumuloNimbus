@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::prelude::*;
-use intercom::{MessagePriority, ServiceBus};
-use sqlx::sqlite::SqlitePool;
+use intercom::MessagePriority;
+use sqlx::{sqlite::SqlitePool, Acquire};
 use sqlx::Row;
 use std::sync::Arc;
 use tracing::{debug, error, info};
@@ -82,18 +82,18 @@ impl Dispatcher {
 
         // save the dataseries to the database
         info!("fetching database connection");
-        let mut executor = self.sqlite_pool.begin().await?;
+        // block until we get a connection
+        let mut executor = self.sqlite_pool.acquire().await?;
+        let mut transaction = executor.begin().await?;
         info!("saving dataseries to database");
-        let res = sqlx::query(
-            r#"
+        let res = sqlx::query(r#"
             INSERT INTO DataSeries (external_id, created_at)
             VALUES (?, DATE('now'))
             ON CONFLICT (external_id) DO UPDATE SET updated_at = DATE('now')
             RETURNING id;
-            "#,
-        )
+        "#,)
         .bind(dataseries.dataseries_id.to_string())
-        .fetch_one(&mut *executor)
+        .fetch_one(&mut *transaction)
         .await?;
         let dataseries_id: i32 = res.try_get("id")?;
         debug!("dataseries_id: {:?}", dataseries_id);
@@ -118,10 +118,10 @@ impl Dispatcher {
             "#,
             values
         ))
-        .execute(&mut *executor)
+        .execute(&mut *transaction)
         .await?;
         info!("committing transaction");
-        executor.commit().await?;
+        transaction.commit().await?;
 
         Ok(())
     }
@@ -131,16 +131,15 @@ impl Dispatcher {
         info!("sending dataseries of id {:?}", dataseries_id);
 
         info!("fetching dataseries from database");
-        let mut executor = self.sqlite_pool.begin().await?;
-        let res = sqlx::query(
-            r#"
-                SELECT external_id
-                FROM DataSeries
-                WHERE external_id = ?;
-            "#,
-        )
+        let mut executor = self.sqlite_pool.acquire().await?;
+        let mut transaction = executor.begin().await?;
+        let res = sqlx::query(r#"
+            SELECT external_id
+            FROM DataSeries
+            WHERE external_id = ?;
+        "#,)
         .bind(dataseries_id.to_string())
-        .fetch_one(&mut *executor)
+        .fetch_one(&mut *transaction)
         .await?;
         let dataseries_id: String = res.try_get("external_id")?;
         debug!("dataseries_id: {:?}", dataseries_id);
@@ -157,7 +156,7 @@ impl Dispatcher {
         .bind(dataseries_id.clone())
         // TODO: parameterize limit
         .bind(1000)
-        .fetch_all(&mut *executor)
+        .fetch_all(&mut *transaction)
         .await?;
 
         // TODO: check if should send again
@@ -188,11 +187,11 @@ impl Dispatcher {
             WHERE dataseries_id = (SELECT Id FROM DataSeries WHERE external_id = ?);
         "#,)
         .bind(dataseries_id)
-        .execute(&mut *executor)
+        .execute(&mut *transaction)
         .await?;
 
         info!("committing transaction");
-        executor.commit().await?;
+        transaction.commit().await?;
         info!("transaction committed");
 
         Ok(())
@@ -221,7 +220,7 @@ impl Dispatcher {
             }
 
             let mut buffer = Vec::new();
-            intercom::serialize::write_message(&mut buffer, &message)?;
+            intercom::serialize_packed::write_message(&mut buffer, &message)?;
 
             buffer
         };
@@ -244,7 +243,7 @@ impl Dispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // use super::*;
 
     #[test]
     fn it_works() {

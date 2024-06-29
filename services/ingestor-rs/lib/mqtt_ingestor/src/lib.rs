@@ -1,7 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use rumqttc::{AsyncClient, MqttOptions, QoS};
-use std::thread;
-use std::{collections::HashMap, sync::Mutex};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -42,7 +41,7 @@ pub struct MqttIngestor {
 
     pub collector: Option<tokio::task::JoinHandle<()>>,
 
-    dispatcher: Arc<Mutex<dispatcher::Dispatcher>>,
+    dispatcher: Arc<dispatcher::Dispatcher>,
 }
 
 impl MqttIngestor {
@@ -51,7 +50,7 @@ impl MqttIngestor {
         mqtt_connector: MqttConnectorConfig,
         mqtt_converter: MqttConverterConfig,
         mqtt_dispatcher: MqttDispatchConfig,
-        dispatcher: Arc<Mutex<dispatcher::Dispatcher>>,
+        dispatcher: Arc<dispatcher::Dispatcher>,
     ) -> Result<Self> {
         Ok(MqttIngestor {
             mqtt_connector,
@@ -127,7 +126,7 @@ impl MqttIngestor {
     pub async fn collect(
         mut mqtt_eventloop: rumqttc::EventLoop,
         mqtt_converter: MqttConverterConfig,
-        dispatcher: Arc<Mutex<dispatcher::Dispatcher>>,
+        dispatcher: Arc<dispatcher::Dispatcher>,
         dispatch_strategy: dispatcher::DispatchStrategy,
     ) -> Result<()> {
         info!("mqtt collect started");
@@ -180,7 +179,7 @@ impl MqttIngestor {
         notification: rumqttc::Event,
         mqtt_converter: &MqttConverterConfig,
         dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
-        dispatcher: &Arc<Mutex<dispatcher::Dispatcher>>,
+        dispatcher: &Arc<dispatcher::Dispatcher>,
         dispatch_strategy: &dispatcher::DispatchStrategy,
     ) -> Result<()> {
         if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) = notification {
@@ -256,10 +255,7 @@ impl MqttIngestor {
                         let dispatcher = dispatcher.clone();
                         // run int another real thread to avoid deadlocking
                         tokio::task::spawn_blocking(move || {
-                            debug!("aqcuiring dispatcher lock");
-                            let dispatcher_lock = dispatcher.lock().unwrap();
-                            debug!("dispatching dataseries");
-                            if let Err(err) = dispatcher_lock.dispatch(&dataseries) {
+                            if let Err(err) = dispatcher.dispatch(&dataseries) {
                                 error!("mqtt dispatch failed: {}", err);
                             }
                         });
@@ -275,7 +271,7 @@ impl MqttIngestor {
 
     async fn handle_interval_tick(
         dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
-        dispatcher: &Arc<Mutex<dispatcher::Dispatcher>>,
+        dispatcher: &Arc<dispatcher::Dispatcher>,
     ) -> Result<()> {
         // for each dataseries in the buffer
         info!("mqtt dispatching {:} dataseries", dataseries_buffer.len());
@@ -290,9 +286,8 @@ impl MqttIngestor {
 
             // dispatch the dataseries
             let dispatcher = dispatcher.clone();
-            tokio::spawn(async move {
-                let dispatcher_lock = dispatcher.lock().unwrap();
-                if let Err(err) = dispatcher_lock.dispatch(&dataseries) {
+            tokio::task::spawn_blocking(move || {
+                if let Err(err) = dispatcher.dispatch(&dataseries) {
                     error!("mqtt dispatch failed: {}", err);
                 }
             });
@@ -368,11 +363,11 @@ async fn check_dispatch_trigger(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // use super::*;
 
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
+    // #[test]
+    // fn it_works() {
+    //     let result = 2 + 2;
+    //     assert_eq!(result, 4);
+    // }
 }
