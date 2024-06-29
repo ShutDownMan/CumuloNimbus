@@ -5,5 +5,7 @@ members = [
     './services/ingestor-rs',
     './services/ingestor-rs/lib/mqtt_ingestor',
     './services/ingestor-rs/lib/dispatcher',
+    './services/persistor-rs',
+    './services/persistor-rs/lib/datakeeper',
     './services/intercom',
 ]

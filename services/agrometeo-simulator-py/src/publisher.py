@@ -11,7 +11,7 @@ broker_host = os.getenv('BROKER_HOST', 'localhost')
 broker_port = int(os.getenv('BROKER_PORT', 1883))
 
 interval_seconds = float(os.getenv('INTERVAL_SECONDS', 5))
-station_ids = range(1, 5)
+station_ids = range(1, 9)
 sensor_ids = range(1, 2)
 magnitude_ids = range(1, 2)
 

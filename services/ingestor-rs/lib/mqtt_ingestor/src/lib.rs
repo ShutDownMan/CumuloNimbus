@@ -153,13 +153,20 @@ impl MqttIngestor {
             // select between the mqtt eventloop and the interval
             tokio::select! {
                 // biased;
-                notification = notification => Self::handle_notification(
-                    notification.context("mqtt eventloop poll failed")?,
-                    &mqtt_converter,
-                    &mut dataseries_buffer,
-                    &dispatcher,
-                    dispatch_strategy,
-                ).await.context("mqtt handle notification failed")?,
+                notification = notification => {
+                    // let notification = notification.context("mqtt eventloop poll failed")?;
+
+                    match notification {
+                        Ok(notification) => Self::handle_notification(
+                            notification,
+                            &mqtt_converter,
+                            &mut dataseries_buffer,
+                            &dispatcher,
+                            dispatch_strategy,
+                        ).await.context("mqtt handle notification failed")?,
+                        Err(err) => warn!("notification result failed {}", err)
+                    }
+                },
                 _ = interval.tick() => Self::handle_interval_tick(&mut dataseries_buffer, &dispatcher).await.context("mqtt interval tick failed")?,
                 else => {
                     warn!("no branch selected in mqtt eventloop poll");
@@ -172,7 +179,7 @@ impl MqttIngestor {
         notification: rumqttc::Event,
         mqtt_converter: &MqttConverterConfig,
         dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
-        dispatcher: &dispatcher::Dispatcher,
+        dispatcher: &Arc<dispatcher::Dispatcher>,
         dispatch_strategy: &dispatcher::DispatchStrategy,
     ) -> Result<()> {
         if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) = notification {
@@ -245,9 +252,13 @@ impl MqttIngestor {
                         };
 
                         // dispatch the dataseries
-                        if let Err(err) = dispatcher.dispatch(&dataseries).await {
-                            error!("mqtt dispatch failed: {}", err);
-                        }
+                        let dispatcher = dispatcher.clone();
+                        // run int another real thread to avoid deadlocking
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(err) = dispatcher.dispatch(&dataseries) {
+                                error!("mqtt dispatch failed: {}", err);
+                            }
+                        });
 
                         // clear the buffer
                         dataseries_buffer.clear();
@@ -260,7 +271,7 @@ impl MqttIngestor {
 
     async fn handle_interval_tick(
         dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
-        dispatcher: &dispatcher::Dispatcher,
+        dispatcher: &Arc<dispatcher::Dispatcher>,
     ) -> Result<()> {
         // for each dataseries in the buffer
         info!("mqtt dispatching {:} dataseries", dataseries_buffer.len());
@@ -274,9 +285,12 @@ impl MqttIngestor {
             };
 
             // dispatch the dataseries
-            if let Err(e) = dispatcher.dispatch(&dataseries).await {
-                error!("mqtt dispatch failed: {}", e);
-            }
+            let dispatcher = dispatcher.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(err) = dispatcher.dispatch(&dataseries) {
+                    error!("mqtt dispatch failed: {}", err);
+                }
+            });
 
             debug!("mqtt dispatched dataseries: {}", dataseries_uuid);
 
@@ -349,11 +363,11 @@ async fn check_dispatch_trigger(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // use super::*;
 
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
+    // #[test]
+    // fn it_works() {
+    //     let result = 2 + 2;
+    //     assert_eq!(result, 4);
+    // }
 }

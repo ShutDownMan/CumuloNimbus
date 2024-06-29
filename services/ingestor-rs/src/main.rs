@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::sqlite::SqlitePool;
+use sqlx::sqlite::{SqlitePoolOptions, SqlitePool};
 use sqlx::{migrate::MigrateDatabase, migrate::Migrator, Sqlite};
 use std::path::Path;
 use std::sync::Arc;
@@ -31,11 +31,6 @@ async fn main() -> Result<()> {
 
     let service_bus = Arc::new(init_service_bus().await?);
 
-    // TODO: move this to consumer service
-    service_bus
-        .simple_queue_declare("persistor.input", "persist-dataseries")
-        .await?;
-
     let mqtt_ingestor = init_mqtt_ingestor(sqlite_pool, service_bus).await?;
 
     match mqtt_ingestor.collector {
@@ -61,9 +56,12 @@ async fn init_sqlite_pool() -> Result<SqlitePool> {
 
     // initialize the database
     info!("initializing database");
-    let sqlite_pool = SqlitePool::connect(DB_URL)
-        .await
-        .expect("failed to connect to sqlite");
+    let sqlite_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(DB_URL)
+        .await?;
 
     // run migrations
     info!("running migrations");
@@ -94,7 +92,7 @@ async fn init_mqtt_ingestor(
             client_id: "rumqtt-async".to_string(),
             host: "localhost".to_string(),
             port: 1883,
-            keep_alive: std::time::Duration::from_secs(5),
+            keep_alive: std::time::Duration::from_secs(60),
         },
         mqtt_subscribe_topic: "agrometeo/stations/#".to_string(),
     };
@@ -116,17 +114,36 @@ async fn init_mqtt_ingestor(
             "agrometeo/stations/4/1/1".to_string(),
             "8f599e75-581d-4250-a456-c678cdf907dd".to_string(),
         ),
+        (
+            "agrometeo/stations/5/1/1".to_string(),
+            "a8442585-0168-4688-8532-31e20520a41f".to_string(),
+        ),
+        (
+            "agrometeo/stations/6/1/1".to_string(),
+            "af16f2f5-482d-45eb-9807-62143fc58d46".to_string(),
+        ),
+        (
+            "agrometeo/stations/7/1/1".to_string(),
+            "448f1dfe-747d-441d-be43-1428924633e3".to_string(),
+        ),
+        (
+            "agrometeo/stations/8/1/1".to_string(),
+            "57599e75-581d-4250-a456-c678cdf907dd".to_string(),
+        ),
     ]);
 
     let mqtt_converter_config = mqtt_ingestor::MqttConverterConfig {
         sensor_dataseries_mapping,
     };
+    // let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
+    //     dispatch_strategy: dispatcher::DispatchStrategy::Realtime
+    // };
     let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
         dispatch_strategy: dispatcher::DispatchStrategy::Batched {
             trigger: dispatcher::DispatchTriggerType::Interval {
-                interval: std::time::Duration::from_secs(30),
+                interval: std::time::Duration::from_secs(5),
             },
-            max_batch: 600,
+            max_batch: 1000,
         },
     };
     let dispatcher = dispatcher::Dispatcher::new(sqlite_pool.clone(), service_bus.clone()).await;
