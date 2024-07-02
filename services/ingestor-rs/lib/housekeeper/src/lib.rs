@@ -90,6 +90,7 @@ impl Housekeeper {
             if pending_dataseries.is_empty() {
                 info!("no pending dataseries found");
                 working = false;
+                patience = 1.0;
                 continue;
             }
 
