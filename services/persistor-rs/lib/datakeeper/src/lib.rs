@@ -3,6 +3,7 @@ use sqlx::{postgres::PgPool, Acquire};
 use std::sync::Arc;
 use tracing::{info, debug, error};
 use sqlx::Row;
+use sqlx::types::chrono::DateTime;
 
 extern crate intercom;
 
@@ -39,10 +40,6 @@ impl DataKeeper {
     }
 
     pub async fn handle_messages(&self) -> Result<()> {
-        // TODO: Subscribe to message types and run callbacks on them
-        // self.service_bus.subscribe("persistor.input", intercom::MessageType::PersistDataSeries, Self::handle_persist_data_series)?;
-        // self.service_bus.subscribe("persistor.input", intercom::MessageType::FetchDataSeries, Self::handle_fetch_data_series)?;
-
         let db_pool_clone = self.db_pool.clone();
         let service_bus_clone = self.service_bus.clone();
         let tokio_handle = self.tokio_handle.clone();
@@ -74,19 +71,12 @@ impl DataKeeper {
         metadata: intercom::LapinAMQPProperties
     ) -> Result<()> {
         let root = reader.get_root::<schemas::persistor_capnp::persist_data_series::Reader>()?;
-        // debug!("Id: {:?}", root.get_id()?);
-        // debug!("Type: {:?}", root.get_type()?);
         let data_series_id = root.get_id()?;
         let data_series_type = root.get_type()?;
         let data_series_values = root.get_values()?;
 
         info!("Persisting data series with id: {:?}", data_series_id);
         debug!("Type: {:?}", data_series_type);
-
-        // for value in root.get_values()? {
-        //     debug!("Timestamp: {:?}", value.get_timestamp());
-        //     debug!("Data: {:?}", value.get_data());
-        // }
 
         persist_dataseries_from_message(db_pool, reader, metadata).await
     }
@@ -145,24 +135,26 @@ pub async fn persist_dataseries_from_message(
         let timestamp = value.get_timestamp();
         let data = value.get_data();
 
-        let timestamp = chrono::NaiveDateTime::from_timestamp_opt(timestamp as i64, 0)
-            .ok_or_else(|| anyhow::anyhow!("Invalid timestamp"))?;
+        // nanosecond accuracy timestamp
+        let timestamp = DateTime::from_timestamp(timestamp / 1_000_000_000, (timestamp % 1_000_000_000) as u32);
 
-        let query = match data.which()? {
-            schemas::persistor_capnp::persist_data_series::data_point::data::Numerical(data) => sqlx::query(r#"
-                INSERT INTO DataPointNumeric (dataseries_id, timestamp, value)
-                VALUES ($1, $2, $3)
-            "#,)
-            .bind(data_series_id)
-            .bind(timestamp)
-            .bind(data)
-            .execute(&mut *transaction),
-            _ => {
-                todo!("Implement other data types")
-            }
-        };
+        if let Some(timestamp) = timestamp {
+            let query = match data.which()? {
+                schemas::persistor_capnp::persist_data_series::data_point::data::Numerical(data) => sqlx::query(r#"
+                    INSERT INTO DataPointNumeric (dataseries_id, timestamp, value)
+                    VALUES ($1, $2, $3)
+                "#,)
+                .bind(data_series_id)
+                .bind(timestamp)
+                .bind(data)
+                .execute(&mut *transaction),
+                _ => {
+                    todo!("Implement other data types")
+                }
+            };
 
-        query.await?;
+            query.await?;
+        }
 
         debug!("Persisted data point: {:?}", data);
     }

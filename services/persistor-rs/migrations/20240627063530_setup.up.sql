@@ -1,5 +1,7 @@
 -- Timescale DB setup migration
 
+CREATE EXTENSION system_stats;
+
 -- Enum with the possible types of data series
 CREATE TYPE DataSeriesType AS ENUM ('numeric', 'text', 'boolean', 'arbitrary', 'jsonb');
 
@@ -26,7 +28,7 @@ CREATE TABLE DataPointNumeric (
     -- Reference to the data series
     dataseries_id INT REFERENCES DataSeries(id),
     -- Timestamp of the data point
-    timestamp TIMESTAMPTZ NOT NULL,
+    timestamp TIMESTAMP(5) NOT NULL,
     -- Value of the data point
     value DOUBLE PRECISION NOT NULL,
     -- Unique constraint to avoid duplicates
@@ -40,7 +42,7 @@ CREATE TABLE DataPointText (
     -- Reference to the data series
     dataseries_id INT REFERENCES DataSeries(id),
     -- Timestamp of the data point
-    timestamp TIMESTAMPTZ NOT NULL,
+    timestamp TIMESTAMP(5) NOT NULL,
     -- Value of the data point
     value TEXT NOT NULL,
     -- Unique constraint to avoid duplicates
@@ -54,7 +56,7 @@ CREATE TABLE DataPointBoolean (
     -- Reference to the data series
     dataseries_id INT REFERENCES DataSeries(id),
     -- Timestamp of the data point
-    timestamp TIMESTAMPTZ NOT NULL,
+    timestamp TIMESTAMP(5) NOT NULL,
     -- Value of the data point
     value BOOLEAN NOT NULL,
     -- Unique constraint to avoid duplicates
@@ -68,7 +70,7 @@ CREATE TABLE DataPointArbitrary (
     -- Reference to the data series
     dataseries_id INT REFERENCES DataSeries(id),
     -- Timestamp of the data point
-    timestamp TIMESTAMPTZ NOT NULL,
+    timestamp TIMESTAMP(5) NOT NULL,
     -- Value of the data point, BLOB
     value BYTEA NOT NULL,
     -- Unique constraint to avoid duplicates
@@ -82,7 +84,7 @@ CREATE TABLE DataPointJsonb (
     -- Reference to the data series
     dataseries_id INT REFERENCES DataSeries(id),
     -- Timestamp of the data point
-    timestamp TIMESTAMPTZ NOT NULL,
+    timestamp TIMESTAMP(5) NOT NULL,
     -- Value of the data point, JSONB
     value JSONB NOT NULL,
     -- Unique constraint to avoid duplicates

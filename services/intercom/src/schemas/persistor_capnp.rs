@@ -431,8 +431,8 @@ pub mod persist_data_series {
         self.reader.total_size()
       }
       #[inline]
-      pub fn get_timestamp(self) -> u64 {
-        self.reader.get_data_field::<u64>(0)
+      pub fn get_timestamp(self) -> i64 {
+        self.reader.get_data_field::<i64>(0)
       }
       #[inline]
       pub fn get_data(self) -> crate::schemas::persistor_capnp::persist_data_series::data_point::data::Reader<'a> {
@@ -493,12 +493,12 @@ pub mod persist_data_series {
         self.builder.as_reader().total_size()
       }
       #[inline]
-      pub fn get_timestamp(self) -> u64 {
-        self.builder.get_data_field::<u64>(0)
+      pub fn get_timestamp(self) -> i64 {
+        self.builder.get_data_field::<i64>(0)
       }
       #[inline]
-      pub fn set_timestamp(&mut self, value: u64)  {
-        self.builder.set_data_field::<u64>(0, value);
+      pub fn set_timestamp(&mut self, value: i64)  {
+        self.builder.set_data_field::<i64>(0, value);
       }
       #[inline]
       pub fn get_data(self) -> crate::schemas::persistor_capnp::persist_data_series::data_point::data::Builder<'a> {
@@ -564,18 +564,18 @@ pub mod persist_data_series {
         ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ::capnp::word(116, 105, 109, 101, 115, 116, 97, 109),
         ::capnp::word(112, 0, 0, 0, 0, 0, 0, 0),
-        ::capnp::word(9, 0, 0, 0, 0, 0, 0, 0),
+        ::capnp::word(5, 0, 0, 0, 0, 0, 0, 0),
         ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-        ::capnp::word(9, 0, 0, 0, 0, 0, 0, 0),
+        ::capnp::word(5, 0, 0, 0, 0, 0, 0, 0),
         ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ::capnp::word(100, 97, 116, 97, 0, 0, 0, 0),
       ];
       pub fn get_field_types(index: u16) -> ::capnp::introspect::Type {
         match index {
-          0 => <u64 as ::capnp::introspect::Introspect>::introspect(),
+          0 => <i64 as ::capnp::introspect::Introspect>::introspect(),
           1 => <crate::schemas::persistor_capnp::persist_data_series::data_point::data::Owned as ::capnp::introspect::Introspect>::introspect(),
           _ => panic!("invalid field index {}", index),
         }

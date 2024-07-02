@@ -2,13 +2,12 @@ use anyhow::{bail, anyhow, Result};
 use flate2::write::ZlibEncoder;
 use flate2::read::ZlibDecoder;
 use flate2::Compression;
-use futures::Future;
 use futures_lite::stream::StreamExt;
 use lapin::{
     message::Delivery, options::*, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties, Consumer
 };
 use std::{io::prelude::*, sync::{Arc, Mutex}};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use std::collections::HashMap;
 use capnp::message::ReaderOptions;
 
@@ -61,6 +60,7 @@ impl ServiceBus {
         info!("CONNECTED");
 
         let channel = connection.create_channel().await?;
+        channel.basic_qos(1, BasicQosOptions::default()).await?;
 
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -228,10 +228,8 @@ impl ServiceBus {
     }
 
     pub async fn listen_forever(&self) -> Result<()> {
-        let channel = self._connection.create_channel().await?;
+        let channel = self.channel.clone();
         let subscriptions = self.subscriptions.clone();
-
-        channel.basic_qos(1, BasicQosOptions::default()).await?;
 
         let consumers = create_consumers(&channel, &subscriptions).await;
 
@@ -463,9 +461,9 @@ pub async fn amqp_main() -> Result<()> {
 mod tests {
     // use super::*;
 
-    // #[test]
-    // fn it_works() {
-    //     let result = 2 + 2;
-    //     assert_eq!(result, 4);
-    // }
+    #[test]
+    fn it_works() {
+        let result = 2 + 2;
+        assert_eq!(result, 4);
+    }
 }
