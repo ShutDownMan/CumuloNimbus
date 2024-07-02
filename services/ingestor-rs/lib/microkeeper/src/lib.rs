@@ -137,7 +137,7 @@ pub async fn get_pending_dataseries(sqlite_pool: Arc<SqlitePool>) -> Result<Vec<
     Ok(dataseries_ids.iter().map(|id| uuid::Uuid::parse_str(id).unwrap()).collect())
 }
 
-pub async fn send_pending_datapoints(sqlite_pool: Arc<SqlitePool>, service_bus: Arc<intercom::ServiceBus>, dataseries_id: &uuid::Uuid) -> Result<()> {
+pub async fn send_pending_datapoints(sqlite_pool: Arc<SqlitePool>, service_bus: Arc<intercom::ServiceBus>, dataseries_id: &uuid::Uuid, realtime: bool) -> Result<()> {
     loop {
         // get the pending datapoints for the dataseries
         tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
@@ -150,7 +150,7 @@ pub async fn send_pending_datapoints(sqlite_pool: Arc<SqlitePool>, service_bus: 
 
         // send the datapoints to the service bus
         publish_dataseries(service_bus.clone(), &pending_datapoints,
-            "persistor.imput", intercom::MessagePriority::Omega).await?;
+            "persistor.imput", intercom::MessagePriority::Omega, !realtime).await?;
 
         let datapoint_ids: Vec<i64> = pending_datapoints.values.iter()
             .map(|datapoint| datapoint.id)
@@ -226,7 +226,7 @@ async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uu
 }
 
 pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseries: &DataSeriesNumeric, topic: &str,
-    priority: intercom::MessagePriority
+    priority: intercom::MessagePriority, compress: bool
 ) -> Result<()> {
     info!("publishing dataseries to service bus");
 
@@ -265,7 +265,7 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
     info!("attempting to send dataseries to service bus");
     let publish_status = service_bus
         .intercom_publish("amq.direct", topic,
-        intercom::MessageType::PersistDataSeries, &buffer, true, priority.into())
+        intercom::MessageType::PersistDataSeries, &buffer, compress, priority.into())
         .await;
     if let Err(e) = publish_status {
         error!("failed to send dataseries to service bus: {:?}", e);

@@ -164,23 +164,24 @@ async fn init_mqtt_ingestor(dispatcher: Arc<dispatcher::Dispatcher>) -> Result<m
     let mqtt_converter_config = mqtt_ingestor::MqttConverterConfig {
         sensor_dataseries_mapping,
     };
-    // let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
-    //     dispatch_config: dispatcher::DispatcherConfig {
-    //         dispatch_strategy: dispatcher::DispatchStrategy::Realtime
-    //     }
-    // };
     let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
         dispatch_config: dispatcher::DispatcherConfig {
-            dispatch_strategy: dispatcher::DispatchStrategy::Batched {
-                trigger: dispatcher::DispatchTrigger::Interval {
-                    interval: std::time::Duration::from_secs(5),
-                },
-                max_batch: 1000,
-            },
-            // 1 week storage
-            temporary_storage: Some(chrono::Duration::weeks(1)),
-        },
+            dispatch_strategy: dispatcher::DispatchStrategy::Realtime,
+            temporary_storage: None,
+        }
     };
+    // let mqtt_dispatcher_config = mqtt_ingestor::MqttDispatchConfig {
+    //     dispatch_config: dispatcher::DispatcherConfig {
+    //         dispatch_strategy: dispatcher::DispatchStrategy::Batched {
+    //             trigger: dispatcher::DispatchTrigger::Interval {
+    //                 interval: std::time::Duration::from_secs(5),
+    //             },
+    //             max_batch: 1000,
+    //         },
+    //         // 1 week storage
+    //         temporary_storage: Some(chrono::Duration::weeks(1)),
+    //     },
+    // };
 
     let mut mqtt_ingestor = mqtt_ingestor::MqttIngestor::new(
         mqtt_connector_config,

@@ -75,9 +75,13 @@ impl Dispatcher {
             DispatchStrategy::Realtime => MessagePriority::Beta,
             DispatchStrategy::Batched { .. } => MessagePriority::Omega,
         };
+        let realtime = match dispath_config.dispatch_strategy {
+            DispatchStrategy::Realtime => true,
+            DispatchStrategy::Batched { .. } => false,
+        };
         // send the dataseries to the service_bus
         let send_dataseries_task = microkeeper::publish_dataseries(self.service_bus.clone(),
-            dataseries, "persist-dataseries", priority);
+            dataseries, "persist-dataseries", priority, realtime);
 
         // block until the task is done
         let publish_result = self.tokio_handle.block_on(send_dataseries_task);

@@ -1,6 +1,6 @@
 -- Timescale DB setup migration
 
-CREATE EXTENSION system_stats;
+-- CREATE EXTENSION system_stats;
 
 -- Enum with the possible types of data series
 CREATE TYPE DataSeriesType AS ENUM ('numeric', 'text', 'boolean', 'arbitrary', 'jsonb');

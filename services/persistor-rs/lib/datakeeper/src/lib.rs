@@ -102,9 +102,6 @@ pub async fn persist_dataseries_from_message(
     let data_series_type = root.get_type()?;
     let data_series_values = root.get_values()?;
 
-    info!("Persisting data series with id: {:?}", data_series_id);
-    debug!("Type: {:?}", data_series_type);
-
     let mut executor = db_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
 
@@ -129,7 +126,7 @@ pub async fn persist_dataseries_from_message(
     .await?;
 
     let data_series_id: i32 = res.try_get("id")?;
-    debug!("Data series id: {:?}", data_series_id);
+    info!("Data series {:} with {:} points to persist", data_series_id, data_series_values.len());
 
     for value in data_series_values {
         let timestamp = value.get_timestamp();
