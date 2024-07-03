@@ -133,7 +133,7 @@ impl MqttIngestor {
         info!("mqtt collect started");
         let dispatch_strategy = &dispatch_config.dispatch_strategy;
 
-        let mut dataseries_buffer: HashMap<Uuid, Vec<dispatcher::DataPointNumeric>> = HashMap::new();
+        let mut dataseries_buffer: HashMap<Uuid, Vec<dispatcher::DataPoint>> = HashMap::new();
 
         let infiniterval = tokio::time::interval(std::time::Duration::from_secs(u64::MAX));
         let interval = match dispatch_strategy {
@@ -180,7 +180,7 @@ impl MqttIngestor {
     async fn handle_notification(
         notification: rumqttc::Event,
         mqtt_converter: &MqttConverterConfig,
-        dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPointNumeric>>,
+        dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
         dispatcher: &Arc<dispatcher::Dispatcher>,
         dispatch_config: &dispatcher::DispatcherConfig,
     ) -> Result<()> {
@@ -227,10 +227,10 @@ impl MqttIngestor {
                 dataseries_buffer
                     .get_mut(&dataseries_uuid)
                     .unwrap()
-                    .push(dispatcher::DataPointNumeric {
+                    .push(dispatcher::DataPoint {
                         id: 0,
                         timestamp: chrono::Utc::now(),
-                        value,
+                        value: dispatcher::DataPointValue::Numeric(value),
                     });
 
                 if let Some(dataseries_buffer) = dataseries_buffer.get_mut(&dataseries_uuid) {
@@ -248,7 +248,7 @@ impl MqttIngestor {
 
                     if should_dispatch_persist {
                         // create a dataseries
-                        let dataseries = dispatcher::DataSeriesNumeric {
+                        let dataseries = dispatcher::DataSeries {
                             dataseries_id: dataseries_uuid,
                             values: dataseries_buffer.clone(),
                         };
@@ -273,7 +273,7 @@ impl MqttIngestor {
     }
 
     async fn handle_interval_tick(
-        dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPointNumeric>>,
+        dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
         dispatcher: &Arc<dispatcher::Dispatcher>,
         dispatch_config: &dispatcher::DispatcherConfig,
     ) -> Result<()> {
@@ -287,7 +287,7 @@ impl MqttIngestor {
             debug!("mqtt dispatching {} values for dataseries {}", dataseries_buffer.len(), dataseries_uuid);
 
             // create a dataseries
-            let dataseries = dispatcher::DataSeriesNumeric {
+            let dataseries = dispatcher::DataSeries {
                 dataseries_id: *dataseries_uuid,
                 values: dataseries_buffer.clone(),
             };
@@ -329,7 +329,7 @@ impl MqttIngestor {
 }
 
 async fn check_dispatch_trigger(
-    dataseries_buffer: &Vec<dispatcher::DataPointNumeric>,
+    dataseries_buffer: &Vec<dispatcher::DataPoint>,
     dispatch_config: &dispatcher::DispatcherConfig,
     dataseries_uuid: &Uuid,
 ) -> bool {

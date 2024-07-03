@@ -328,8 +328,18 @@ async fn process_message(
     debug!("Message Type: {}", &dbg_message_type);
 
     // TODO: check if message is really compressed before decoding
-    let body = gzip_decode(&delivery.data).await;
-    if let Ok(body) = body {
+    let data_ref = &delivery.data;
+    let body = match properties.content_encoding() {
+        Some(encoding) => {
+            if encoding.as_str() == "gzip" {
+                gzip_decode(data_ref).await.ok()
+            } else {
+                Some(data_ref.clone())
+            }
+        },
+        None => Some(data_ref.clone())
+    };
+    if let Some(body) = body {
         let metadata = properties.clone();
         let topic = topic.to_string();
         debug!("Handling message");

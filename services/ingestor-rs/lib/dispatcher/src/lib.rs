@@ -6,8 +6,9 @@ use tracing::{debug, error, info};
 
 extern crate intercom;
 
-pub use microkeeper::DataSeriesNumeric;
-pub use microkeeper::DataPointNumeric;
+pub use microkeeper::DataSeries;
+pub use microkeeper::DataPoint;
+pub use microkeeper::DataPointValue;
 
 pub struct Dispatcher {
     sqlite_pool: Arc<SqlitePool>,
@@ -54,7 +55,7 @@ impl Dispatcher {
         })
     }
 
-    pub fn dispatch_to_persistor(&self, dataseries: &DataSeriesNumeric, dispath_config: &DispatcherConfig) -> Result<()> {
+    pub fn dispatch_to_persistor(&self, dataseries: &DataSeries, dispath_config: &DispatcherConfig) -> Result<()> {
         debug!(
             "dispatching dataseries of id {:?}",
             dataseries.dataseries_id

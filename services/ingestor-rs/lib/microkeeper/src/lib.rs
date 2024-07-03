@@ -1,6 +1,8 @@
 use anyhow::Result;
+use intercom::schemas::persistor_capnp::persist_data_series::data_point;
 use tracing::{debug, error, info, warn};
 use sqlx::{Row, sqlite::SqlitePool, Acquire};
+use tracing_subscriber::registry::Data;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -16,29 +18,73 @@ impl std::fmt::Display for DatabaseLockError {
 }
 
 #[derive(Clone, Debug)]
-pub struct DataPointNumeric {
-    pub id: i64,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub value: f64,
+pub struct DataSeries {
+    pub dataseries_id: Uuid,
+    pub values: Vec<DataPoint>,
 }
 
 #[derive(Clone, Debug)]
-pub struct DataSeriesNumeric {
-    pub dataseries_id: Uuid,
-    pub values: Vec<DataPointNumeric>,
+pub struct DataPoint {
+    pub id: i64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub value: DataPointValue,
 }
 
-pub enum DataSeriesValues {
-    Numeric(Vec<DataPointNumeric>),
-    // Categorical(Vec<DataPointCategorical>),
+#[derive(Clone, Debug)]
+pub enum DataPointValue {
+    Numeric(f64),
+    Text(String),
+    Boolean(bool),
+    Arbitrary(Vec<u8>),
+    // Jsonb(serde_json::Value),
 }
 
-pub struct DataSeries {
-    pub dataseries_id: Uuid,
-    pub values: DataSeriesValues,
+trait DataPointValueTrait {
+    fn try_get_numerical(&self) -> Result<f64>;
+    fn try_get_text(&self) -> Result<&String>;
+    fn try_get_boolean(&self) -> Result<bool>;
+    fn try_get_arbitrary(&self) -> Result<&Vec<u8>>;
+    // fn try_get_jsonb(&self) -> Result<serde_json::Value>;
 }
 
-pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeriesNumeric) -> Result<Vec<i64>> {
+impl DataPointValueTrait for DataPointValue {
+    fn try_get_numerical(&self) -> Result<f64> {
+        match self {
+            DataPointValue::Numeric(value) => Ok(*value),
+            _ => Err(anyhow::anyhow!("DataPointValue is not Numeric")),
+        }
+    }
+
+    fn try_get_text(&self) -> Result<&String> {
+        match self {
+            DataPointValue::Text(value) => Ok(value),
+            _ => Err(anyhow::anyhow!("DataPointValue is not Text")),
+        }
+    }
+
+    fn try_get_boolean(&self) -> Result<bool> {
+        match self {
+            DataPointValue::Boolean(value) => Ok(*value),
+            _ => Err(anyhow::anyhow!("DataPointValue is not Boolean")),
+        }
+    }
+
+    fn try_get_arbitrary(&self) -> Result<&Vec<u8>> {
+        match self {
+            DataPointValue::Arbitrary(value) => Ok(value),
+            _ => Err(anyhow::anyhow!("DataPointValue is not Arbitrary")),
+        }
+    }
+
+    // fn try_get_jsonb(&self) -> Result<serde_json::Value> {
+    //     match self {
+    //         DataPointValue::Jsonb(value) => Ok(value.clone()),
+    //         _ => Err(anyhow::anyhow!("DataPointValue is not Jsonb")),
+    //     }
+    // }
+}
+
+pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeries) -> Result<Vec<i64>> {
     // this time we will save as much as possible in a single statement
     info!("saving dataseries of id {:?}", dataseries.dataseries_id);
 
@@ -48,7 +94,7 @@ pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeri
     }
 
     // save the dataseries to the database
-    info!("fetching database connection");
+    info!("fetching database connection to save dataseries {:?}", dataseries.dataseries_id);
     // block until we get a connection
     let mut executor = sqlite_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
@@ -65,7 +111,7 @@ pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeri
     let dataseries_id: i32 = res.try_get("id")?;
     debug!("dataseries_id: {:?}", dataseries_id);
 
-    info!("saving datapoints to database");
+    info!("saving datapoints of dataseries {:?} to database", dataseries.dataseries_id);
     let mut datapoint_ids = Vec::new();
 
     for data_point in dataseries.values.iter() {
@@ -78,7 +124,7 @@ pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeri
         "#,)
         .bind(dataseries_id)
         .bind(data_point.timestamp.timestamp_nanos_opt().unwrap_or(0))
-        .bind(data_point.value)
+        .bind(data_point.value.try_get_numerical()?)
         .fetch_all(&mut *transaction)
         .await?;
 
@@ -104,7 +150,7 @@ pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeri
 
 pub async fn get_pending_dataseries(sqlite_pool: Arc<SqlitePool>) -> Result<Vec<uuid::Uuid>> {
     // get the pending dataseries from the database
-    info!("fetching database connection");
+    info!("fetching database connection to get pending dataseries");
     // block until we get a connection
     let executor = sqlite_pool.try_acquire();
     if let None = executor {
@@ -163,9 +209,9 @@ pub async fn send_pending_datapoints(sqlite_pool: Arc<SqlitePool>, service_bus: 
     Ok(())
 }
 
-async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uuid::Uuid) -> Result<DataSeriesNumeric> {
+async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uuid::Uuid) -> Result<DataSeries> {
     // get the pending datapoints for the dataseries from the database
-    info!("fetching database connection");
+    info!("fetching database connection to get pending datapoints");
     let executor = sqlite_pool.try_acquire();
     if let None = executor {
         warn!("could not acquire database connection");
@@ -189,7 +235,7 @@ async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uu
 
     let mut datapoint_ids: Vec<i64> = Vec::new();
     datapoint_ids.reserve(rows.len());
-    let mut datapoints: Vec<DataPointNumeric> = Vec::new();
+    let mut datapoints: Vec<DataPoint> = Vec::new();
     datapoints.reserve(rows.len());
 
     info!("transforming rows into datapoints");
@@ -203,7 +249,7 @@ async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uu
         let timestamp = chrono::DateTime::from_timestamp(nano_timestamp / 1_000_000_000, (nano_timestamp % 1_000_000_000) as u32);
         // if invalid timestamp, skip
         match timestamp {
-            Some(timestamp) => datapoints.push(DataPointNumeric { id, timestamp, value }),
+            Some(timestamp) => datapoints.push(DataPoint { id, timestamp, value: DataPointValue::Numeric(value) }),
             None => {
                 error!("invalid timestamp: {:?}", nano_timestamp);
                 continue;
@@ -214,7 +260,7 @@ async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uu
     }
 
     info!("datapoints count: {}", datapoints.len());
-    let dataseries = DataSeriesNumeric {
+    let dataseries = DataSeries {
         dataseries_id: dataseries_id.clone(),
         values: datapoints,
     };
@@ -225,7 +271,7 @@ async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uu
     Ok(dataseries)
 }
 
-pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseries: &DataSeriesNumeric, topic: &str,
+pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseries: &DataSeries, topic: &str,
     priority: intercom::MessagePriority, compress: bool
 ) -> Result<()> {
     info!("publishing dataseries to service bus");
@@ -253,7 +299,7 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
             let mut datapoint_builder = datapoints_builder.reborrow().get(i as u32);
             // nano accuracy timestamp
             datapoint_builder.set_timestamp(datapoint.timestamp.timestamp_nanos_opt().unwrap_or(0));
-            datapoint_builder.init_data().set_numerical(datapoint.value);
+            datapoint_builder.init_data().set_numerical(datapoint.value.try_get_numerical()?);
         }
 
         let mut buffer = Vec::new();
@@ -279,7 +325,7 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
 pub async fn mark_datapoints_as_sent(sqlite_pool: Arc<SqlitePool>, datapoint_ids: &Vec<i64>) -> Result<()> {
     // info!("marking datapoints as sent");
 
-    info!("fetching database connection");
+    info!("fetching database connection to mark datapoints as sent");
     let mut executor = sqlite_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
 
