@@ -48,7 +48,7 @@ async fn init_timescale_pool() -> Result<PgPool> {
     debug!("Fetching database URL from env");
     let db_url = env::var("PERSISTOR_DB_URL")?;
     let max_connections = env::var("PERSISTOR_DB_MAX_CONNECTIONS")
-        .unwrap_or("5".into())
+        .unwrap_or("3".into())
         .parse::<u32>()?;
 
     debug!("{:#?}", db_url);

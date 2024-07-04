@@ -11,9 +11,9 @@ broker_host = os.getenv('BROKER_HOST', 'localhost')
 broker_port = int(os.getenv('BROKER_PORT', 1883))
 
 interval_seconds = float(os.getenv('INTERVAL_SECONDS', 5))
-station_ids = range(1, 9)
-sensor_ids = range(1, 2)
-magnitude_ids = range(1, 2)
+station_ids = range(1, 8 + 1)
+sensor_ids = range(1, 6 + 1)
+magnitude_ids = range(1, 2 + 1)
 
 
 def generate_measurements(noises):
@@ -27,14 +27,14 @@ def generate_measurements(noises):
             data (dict): A dictionary containing generated data.
     """
     data = {}
-    for station_id in station_ids:
+    for magnitude_id in magnitude_ids:
         for sensor_id in sensor_ids:
-            for magnitude_id in magnitude_ids:
+            for station_id in station_ids:
                 noise = noises[(station_id, sensor_id, magnitude_id)]
                 data[(station_id, sensor_id, magnitude_id)] = noise(
                     [time.time()]) * 100
 
-    print(data)
+    # print(data)
     return data
 
 
@@ -71,7 +71,7 @@ def main():
         # send data to a broker
         print("Sending data to a broker...")
         for key, value in generated_measurements.items():
-            print(f"agrometeo/stations/{key[0]}/{key[1]}/{key[2]}: {value}")
+            # print(f"agrometeo/stations/{key[0]}/{key[1]}/{key[2]}: {value}")
             client.publish(
                 f"agrometeo/stations/{key[0]}/{key[1]}/{key[2]}", value)
             # wait interval_seconds seconds

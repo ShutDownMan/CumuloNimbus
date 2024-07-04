@@ -7,13 +7,17 @@ include = ["/src", "/lib"]
 [dependencies]
 anyhow = "1.0.72"
 tokio = { version = "1.29.1", features = ["full"] }
-mqtt_ingestor = { path = './lib/mqtt_ingestor' }
 sqlx = { version = "0.7.1", features = ["sqlite", "runtime-tokio-native-tls"] }
-intercom = { path = '../intercom' }
-dispatcher = { path = './lib/dispatcher' }
 tracing = "0.1.37"
 tracing-subscriber = {version = "0.3.17", features=["env-filter"]}
 chrono = "0.4.38"
+uuid = { version = "1.4.1", features = ["v8"] }
+sha1 = "0.10.5"
+
+intercom = { path = '../intercom' }
+dispatcher = { path = './lib/dispatcher' }
+mqtt_ingestor = { path = './lib/mqtt_ingestor' }
+housekeeper = { path = './lib/housekeeper' }
 
 [[bin]]
 name = "ingestor"

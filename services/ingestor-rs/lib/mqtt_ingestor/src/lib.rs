@@ -28,7 +28,8 @@ pub struct MqttConverterConfig {
 
 #[derive(Clone, Debug)]
 pub struct MqttDispatchConfig {
-    pub dispatch_strategy: dispatcher::DispatchStrategy,
+    // pub dispatch_strategy: dispatcher::DispatchStrategy,
+    pub dispatch_config: dispatcher::DispatcherConfig,
 }
 
 pub struct MqttIngestor {
@@ -104,7 +105,7 @@ impl MqttIngestor {
         let mqtt_converter = self.mqtt_converter.clone();
 
         let dispatcher = self.dispatcher.clone();
-        let dispatch_strategy = self.mqtt_dispatcher.dispatch_strategy.clone();
+        let dispatch_config = self.mqtt_dispatcher.dispatch_config.clone();
 
         // spawn collector thread
         self.collector = Some(tokio::spawn(async move {
@@ -112,7 +113,7 @@ impl MqttIngestor {
                 mqtt_eventloop,
                 mqtt_converter,
                 dispatcher,
-                dispatch_strategy,
+                dispatch_config,
             )
             .await
             {
@@ -127,18 +128,18 @@ impl MqttIngestor {
         mut mqtt_eventloop: rumqttc::EventLoop,
         mqtt_converter: MqttConverterConfig,
         dispatcher: Arc<dispatcher::Dispatcher>,
-        dispatch_strategy: dispatcher::DispatchStrategy,
+        dispatch_config: dispatcher::DispatcherConfig,
     ) -> Result<()> {
         info!("mqtt collect started");
-        let dispatch_strategy = &dispatch_strategy;
+        let dispatch_strategy = &dispatch_config.dispatch_strategy;
 
         let mut dataseries_buffer: HashMap<Uuid, Vec<dispatcher::DataPoint>> = HashMap::new();
 
         let infiniterval = tokio::time::interval(std::time::Duration::from_secs(u64::MAX));
-        let interval = match dispatch_strategy {
+        let mut interval = match dispatch_strategy {
             dispatcher::DispatchStrategy::Realtime => infiniterval,
             dispatcher::DispatchStrategy::Batched { trigger, .. } => match trigger {
-                dispatcher::DispatchTriggerType::Interval { interval } => {
+                dispatcher::DispatchTrigger::Interval { interval } => {
                     tokio::time::interval(*interval)
                 }
                 _ => infiniterval,
@@ -146,7 +147,6 @@ impl MqttIngestor {
         };
 
         info!("mqtt collect loop started");
-        let mut interval = interval;
         loop {
             let notification = mqtt_eventloop.poll();
 
@@ -162,12 +162,13 @@ impl MqttIngestor {
                             &mqtt_converter,
                             &mut dataseries_buffer,
                             &dispatcher,
-                            dispatch_strategy,
+                            &dispatch_config,
                         ).await.context("mqtt handle notification failed")?,
                         Err(err) => warn!("notification result failed {}", err)
                     }
                 },
-                _ = interval.tick() => Self::handle_interval_tick(&mut dataseries_buffer, &dispatcher).await.context("mqtt interval tick failed")?,
+                _ = interval.tick() => Self::handle_interval_tick(&mut dataseries_buffer, &dispatcher, &dispatch_config).await
+                    .context("mqtt handle interval tick failed")?,
                 else => {
                     warn!("no branch selected in mqtt eventloop poll");
                 }
@@ -180,7 +181,7 @@ impl MqttIngestor {
         mqtt_converter: &MqttConverterConfig,
         dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
         dispatcher: &Arc<dispatcher::Dispatcher>,
-        dispatch_strategy: &dispatcher::DispatchStrategy,
+        dispatch_config: &dispatcher::DispatcherConfig,
     ) -> Result<()> {
         if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) = notification {
             // check if the topic path is in the mapping
@@ -212,10 +213,10 @@ impl MqttIngestor {
                     }
                 };
 
-                debug!(
-                    "adding datapoint to dataseries {}",
-                    dataseries_uuid.to_string()
-                );
+                // debug!(
+                //     "adding datapoint to dataseries {}",
+                //     dataseries_uuid.to_string()
+                // );
                 // check if the dataseries is not already in the buffer
                 dataseries_buffer
                     .entry(dataseries_uuid)
@@ -226,25 +227,25 @@ impl MqttIngestor {
                     .get_mut(&dataseries_uuid)
                     .unwrap()
                     .push(dispatcher::DataPoint {
+                        id: 0,
                         timestamp: chrono::Utc::now(),
-                        value,
+                        value: dispatcher::DataPointValue::Numeric(value),
                     });
 
-                // check if the dataseries is already in the buffer
                 if let Some(dataseries_buffer) = dataseries_buffer.get_mut(&dataseries_uuid) {
                     debug!(
                         "dataseries {} buffer length: {}",
                         dataseries_uuid,
                         dataseries_buffer.len()
                     );
-                    let should_dispatch = check_dispatch_trigger(
+                    let should_dispatch_persist = check_dispatch_trigger(
                         dataseries_buffer,
-                        dispatch_strategy,
+                        dispatch_config,
                         &dataseries_uuid,
                     )
                     .await;
 
-                    if should_dispatch {
+                    if should_dispatch_persist {
                         // create a dataseries
                         let dataseries = dispatcher::DataSeries {
                             dataseries_id: dataseries_uuid,
@@ -253,10 +254,11 @@ impl MqttIngestor {
 
                         // dispatch the dataseries
                         let dispatcher = dispatcher.clone();
-                        // run int another real thread to avoid deadlocking
+                        let dispatch_config = dispatch_config.clone();
+                        // run in another real thread to avoid deadlocking
                         tokio::task::spawn_blocking(move || {
-                            if let Err(err) = dispatcher.dispatch(&dataseries) {
-                                error!("mqtt dispatch failed: {}", err);
+                            if let Err(err) = dispatcher.dispatch_to_persistor(&dataseries, &dispatch_config) {
+                                error!("mqtt dispatch failed when handling notification: {}", err);
                             }
                         });
 
@@ -272,11 +274,16 @@ impl MqttIngestor {
     async fn handle_interval_tick(
         dataseries_buffer: &mut HashMap<Uuid, Vec<dispatcher::DataPoint>>,
         dispatcher: &Arc<dispatcher::Dispatcher>,
+        dispatch_config: &dispatcher::DispatcherConfig,
     ) -> Result<()> {
+        info!("mqtt interval tick");
         // for each dataseries in the buffer
-        info!("mqtt dispatching {:} dataseries", dataseries_buffer.len());
+        if dataseries_buffer.is_empty() {
+            info!("dataseries buffer is empty");
+            return Ok(());
+        }
         for (dataseries_uuid, dataseries_buffer) in dataseries_buffer.iter_mut() {
-            debug!("mqtt dispatching dataseries: {}", dataseries_uuid);
+            debug!("mqtt dispatching {} values for dataseries {}", dataseries_buffer.len(), dataseries_uuid);
 
             // create a dataseries
             let dataseries = dispatcher::DataSeries {
@@ -286,8 +293,9 @@ impl MqttIngestor {
 
             // dispatch the dataseries
             let dispatcher = dispatcher.clone();
+            let dispatch_config = dispatch_config.clone();
             tokio::task::spawn_blocking(move || {
-                if let Err(err) = dispatcher.dispatch(&dataseries) {
+                if let Err(err) = dispatcher.dispatch_to_persistor(&dataseries, &dispatch_config) {
                     error!("mqtt dispatch failed: {}", err);
                 }
             });
@@ -321,11 +329,12 @@ impl MqttIngestor {
 
 async fn check_dispatch_trigger(
     dataseries_buffer: &Vec<dispatcher::DataPoint>,
-    dispatch_strategy: &dispatcher::DispatchStrategy,
+    dispatch_config: &dispatcher::DispatcherConfig,
     dataseries_uuid: &Uuid,
 ) -> bool {
+    let dispatch_strategy = &dispatch_config.dispatch_strategy;
     let mut should_dispatch = false;
-    debug!("checking dispatch trigger for dataseries {}", dataseries_uuid);
+    // debug!("checking dispatch trigger for dataseries {}", dataseries_uuid);
     // check if dispatch strategy is set to batch
     match dispatch_strategy {
         dispatcher::DispatchStrategy::Batched { max_batch, trigger } => {
@@ -336,7 +345,7 @@ async fn check_dispatch_trigger(
             }
 
             // check if holdoff time is reached
-            if let dispatcher::DispatchTriggerType::Holdoff { holdoff } = trigger {
+            if let dispatcher::DispatchTrigger::Holdoff { holdoff } = trigger {
                 if let Some(first_datapoint) = dataseries_buffer.first() {
                     let last_datapoint_timestamp = first_datapoint.timestamp;
                     let now = chrono::Utc::now();

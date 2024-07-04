@@ -14,7 +14,7 @@ struct PersistDataSeries {
   }
 
   struct DataPoint {
-    timestamp @0 :UInt64;
+    timestamp @0 :Int64;
     data :union {
       numerical @1 :Float64;
       text @2 :Text;
