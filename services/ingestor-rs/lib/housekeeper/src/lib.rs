@@ -91,49 +91,73 @@ impl Housekeeper {
                 info!("no pending dataseries found");
                 working = false;
                 patience = 1.0;
-                continue;
-            }
+            } else {
+                working = true;
 
-            working = true;
+                // dispatch the dataseries
+                for dataseries_id in pending_dataseries.iter() {
+                    // loop until we run out of patience
+                    while patience > config.patience_min_threshold {
+                        // send the pending datapoints
+                        tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
+                        let send_result = microkeeper::send_pending_datapoints(
+                            self.sqlite_pool.clone(), self.service_bus.clone(), dataseries_id, false).await;
 
-            // dispatch the dataseries
-            for dataseries_id in pending_dataseries.iter() {
-                // loop until we run out of patience
-                while patience > config.patience_min_threshold {
-                    // send the pending datapoints
-                    tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
-                    let send_result = microkeeper::send_pending_datapoints(
-                        self.sqlite_pool.clone(), self.service_bus.clone(), dataseries_id, false).await;
-
-                    match send_result {
-                        Ok(_) => {
-                            info!("datapoints for dataseries {:?} sent successfully", dataseries_id);
-                            // recover patience
-                            patience = (patience + config.patience_recovery_rate).clamp(0.0, 1.0);
-                            break;
-                        }
-                        Err(e) => {
-                            match e.downcast_ref::<microkeeper::DatabaseLockError>() {
-                                Some(_) => {
-                                    warn!("could not lock the database");
-                                    // decrease patience
-                                    patience = (patience * config.patience_falloff_rate).clamp(0.0, 1.0);
-                                    tokio::time::sleep(Self::calculate_sleep_duration(&config, patience, working)).await;
-                                    continue;
-                                }
-                                None => {
-                                    error!("error sending datapoints");
-                                    break;
+                        match send_result {
+                            Ok(_) => {
+                                info!("datapoints for dataseries {:?} sent successfully", dataseries_id);
+                                // recover patience
+                                patience = (patience + config.patience_recovery_rate).clamp(0.0, 1.0);
+                                break;
+                            }
+                            Err(e) => {
+                                match e.downcast_ref::<microkeeper::DatabaseLockError>() {
+                                    Some(_) => {
+                                        warn!("could not lock the database");
+                                        // decrease patience
+                                        patience = (patience * config.patience_falloff_rate).clamp(0.0, 1.0);
+                                        tokio::time::sleep(Self::calculate_sleep_duration(&config, patience, working)).await;
+                                        continue;
+                                    }
+                                    None => {
+                                        error!("error sending datapoints");
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                    };
-                }
+                        };
+                    }
 
-                debug!("patience: {}", patience);
-                if patience == 0.0 {
-                    warn!("ran out of patience!");
-                    break;
+                    debug!("patience: {}", patience);
+                    if patience == 0.0 {
+                        warn!("ran out of patience!");
+                        break;
+                    }
+                }
+            }
+
+            // delete expired datapoints
+            loop {
+                tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
+                let expired_datapoints = microkeeper::delete_expired_datapoints(self.sqlite_pool.clone()).await;
+                match expired_datapoints {
+                    Ok(_) => {
+                        info!("expired datapoints deleted successfully");
+                        break;
+                    }
+                    Err(e) => {
+                        match e.downcast_ref::<microkeeper::DatabaseLockError>() {
+                            Some(_) => {
+                                warn!("could not lock the database");
+                                tokio::time::sleep(Self::calculate_sleep_duration(&config, patience, working)).await;
+                                continue;
+                            }
+                            None => {
+                                error!("error deleting expired datapoints");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
 

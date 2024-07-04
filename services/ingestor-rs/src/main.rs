@@ -176,10 +176,10 @@ async fn init_mqtt_ingestor(dispatcher: Arc<dispatcher::Dispatcher>) -> Result<m
                 trigger: dispatcher::DispatchTrigger::Interval {
                     interval: std::time::Duration::from_secs(30),
                 },
-                max_batch: 2300,
+                max_batch: 2200,
             },
-            // 1 week storage
-            temporary_storage: Some(chrono::Duration::weeks(1)),
+            // 5 mins storage
+            temporary_storage: Some(chrono::Duration::minutes(5)),
         },
     };
 

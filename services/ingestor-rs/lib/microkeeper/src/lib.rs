@@ -1,8 +1,6 @@
 use anyhow::Result;
-use intercom::schemas::persistor_capnp::persist_data_series::data_point;
 use tracing::{debug, error, info, warn};
 use sqlx::{Row, sqlite::SqlitePool, Acquire};
-use tracing_subscriber::registry::Data;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -41,9 +39,9 @@ pub enum DataPointValue {
 
 trait DataPointValueTrait {
     fn try_get_numerical(&self) -> Result<f64>;
-    fn try_get_text(&self) -> Result<&String>;
-    fn try_get_boolean(&self) -> Result<bool>;
-    fn try_get_arbitrary(&self) -> Result<&Vec<u8>>;
+    // fn try_get_text(&self) -> Result<&String>;
+    // fn try_get_boolean(&self) -> Result<bool>;
+    // fn try_get_arbitrary(&self) -> Result<&Vec<u8>>;
     // fn try_get_jsonb(&self) -> Result<serde_json::Value>;
 }
 
@@ -55,26 +53,26 @@ impl DataPointValueTrait for DataPointValue {
         }
     }
 
-    fn try_get_text(&self) -> Result<&String> {
-        match self {
-            DataPointValue::Text(value) => Ok(value),
-            _ => Err(anyhow::anyhow!("DataPointValue is not Text")),
-        }
-    }
+    // fn try_get_text(&self) -> Result<&String> {
+    //     match self {
+    //         DataPointValue::Text(value) => Ok(value),
+    //         _ => Err(anyhow::anyhow!("DataPointValue is not Text")),
+    //     }
+    // }
 
-    fn try_get_boolean(&self) -> Result<bool> {
-        match self {
-            DataPointValue::Boolean(value) => Ok(*value),
-            _ => Err(anyhow::anyhow!("DataPointValue is not Boolean")),
-        }
-    }
+    // fn try_get_boolean(&self) -> Result<bool> {
+    //     match self {
+    //         DataPointValue::Boolean(value) => Ok(*value),
+    //         _ => Err(anyhow::anyhow!("DataPointValue is not Boolean")),
+    //     }
+    // }
 
-    fn try_get_arbitrary(&self) -> Result<&Vec<u8>> {
-        match self {
-            DataPointValue::Arbitrary(value) => Ok(value),
-            _ => Err(anyhow::anyhow!("DataPointValue is not Arbitrary")),
-        }
-    }
+    // fn try_get_arbitrary(&self) -> Result<&Vec<u8>> {
+    //     match self {
+    //         DataPointValue::Arbitrary(value) => Ok(value),
+    //         _ => Err(anyhow::anyhow!("DataPointValue is not Arbitrary")),
+    //     }
+    // }
 
     // fn try_get_jsonb(&self) -> Result<serde_json::Value> {
     //     match self {
@@ -84,7 +82,7 @@ impl DataPointValueTrait for DataPointValue {
     // }
 }
 
-pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeries) -> Result<Vec<i64>> {
+pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeries, expiration: chrono::Duration) -> Result<Vec<i64>> {
     // this time we will save as much as possible in a single statement
     info!("saving dataseries of id {:?}", dataseries.dataseries_id);
 
@@ -101,11 +99,12 @@ pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeri
     info!("saving dataseries to database");
     let res = sqlx::query(r#"
         INSERT INTO DataSeries (external_id, created_at)
-        VALUES (?, DATE('now'))
-        ON CONFLICT (external_id) DO UPDATE SET updated_at = DATE('now')
+        VALUES ($1, $2)
+        ON CONFLICT (external_id) DO UPDATE SET updated_at = $2
         RETURNING id;
     "#,)
     .bind(dataseries.dataseries_id.to_string())
+    .bind(chrono::Utc::now().timestamp())
     .fetch_one(&mut *transaction)
     .await?;
     let dataseries_id: i32 = res.try_get("id")?;
@@ -117,14 +116,16 @@ pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeri
     for data_point in dataseries.values.iter() {
         debug!("saving datapoint {:?}", data_point);
         let mut new_datapoint_ids = sqlx::query(r#"
-            INSERT INTO DataPoint (dataseries_id, timestamp, value, created_at)
-            VALUES (?, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))
+            INSERT INTO DataPoint (dataseries_id, timestamp, value, created_at, expiration)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (dataseries_id, timestamp) DO UPDATE SET value = EXCLUDED.value
             RETURNING id;
         "#,)
         .bind(dataseries_id)
         .bind(data_point.timestamp.timestamp_nanos_opt().unwrap_or(0))
         .bind(data_point.value.try_get_numerical()?)
+        .bind(chrono::Utc::now().timestamp())
+        .bind(chrono::Utc::now().timestamp() + expiration.num_seconds())
         .fetch_all(&mut *transaction)
         .await?;
 
@@ -274,12 +275,11 @@ async fn get_pending_datapoints(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uu
 pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseries: &DataSeries, topic: &str,
     priority: intercom::MessagePriority, compress: bool
 ) -> Result<()> {
-    info!("publishing dataseries to service bus");
-
     if dataseries.values.is_empty() {
         info!("no datapoints to publish for dataseries {:?}", dataseries.dataseries_id);
         return Ok(());
     }
+    info!("publishing dataseries to service bus");
 
     let dataseries_id = dataseries.dataseries_id.to_string();
 
@@ -317,13 +317,18 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
         error!("failed to send dataseries to service bus: {:?}", e);
         return Err(e);
     }
-    info!("dataseries sent to service bus");
+    info!("dataseries {} sent to service bus", dataseries_id);
 
     Ok(())
 }
 
 pub async fn mark_datapoints_as_sent(sqlite_pool: Arc<SqlitePool>, datapoint_ids: &Vec<i64>) -> Result<()> {
-    // info!("marking datapoints as sent");
+    if datapoint_ids.is_empty() {
+        info!("no datapoints to mark as sent");
+        return Ok(());
+    }
+
+    info!("marking {} datapoints as sent", datapoint_ids.len());
 
     info!("fetching database connection to mark datapoints as sent");
     let mut executor = sqlite_pool.acquire().await?;
@@ -332,9 +337,10 @@ pub async fn mark_datapoints_as_sent(sqlite_pool: Arc<SqlitePool>, datapoint_ids
     let query = format!(
         r#"
         UPDATE DataPoint
-        SET sent_at = CURRENT_TIMESTAMP
+        SET sent_at = {}
         WHERE id IN ({});
         "#,
+        chrono::Utc::now().timestamp(),
         datapoint_ids.iter().map(|id| id.to_string()).collect::<Vec<String>>().join(", ")
     );
 
@@ -344,7 +350,29 @@ pub async fn mark_datapoints_as_sent(sqlite_pool: Arc<SqlitePool>, datapoint_ids
 
     transaction.commit().await?;
 
-    // info!("datapoints marked as sent");
+    info!("{} datapoints marked as sent", datapoint_ids.len());
+
+    Ok(())
+}
+
+pub async fn delete_expired_datapoints(sqlite_pool: Arc<SqlitePool>) -> Result<()> {
+    // info!("deleting expired datapoints");
+
+    info!("fetching database connection to delete expired datapoints");
+    let mut executor = sqlite_pool.acquire().await?;
+    let mut transaction = executor.begin().await?;
+
+    let query = sqlx::query(r#"
+        DELETE FROM DataPoint
+        WHERE expiration < $1;
+    "#)
+    .bind(chrono::Utc::now().timestamp())
+    .execute(&mut *transaction)
+    .await?;
+
+    info!("deleted {} expired datapoints", query.rows_affected());
+
+    transaction.commit().await?;
 
     Ok(())
 }

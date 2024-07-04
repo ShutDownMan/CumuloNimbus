@@ -136,7 +136,7 @@ impl MqttIngestor {
         let mut dataseries_buffer: HashMap<Uuid, Vec<dispatcher::DataPoint>> = HashMap::new();
 
         let infiniterval = tokio::time::interval(std::time::Duration::from_secs(u64::MAX));
-        let interval = match dispatch_strategy {
+        let mut interval = match dispatch_strategy {
             dispatcher::DispatchStrategy::Realtime => infiniterval,
             dispatcher::DispatchStrategy::Batched { trigger, .. } => match trigger {
                 dispatcher::DispatchTrigger::Interval { interval } => {
@@ -147,7 +147,6 @@ impl MqttIngestor {
         };
 
         info!("mqtt collect loop started");
-        let mut interval = interval;
         loop {
             let notification = mqtt_eventloop.poll();
 

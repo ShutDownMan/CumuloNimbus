@@ -96,8 +96,9 @@ impl Dispatcher {
 
         if temporary_storage {
             info!("persisting dataseries of id {:?}", dataseries.dataseries_id);
+            let expiry = dispath_config.temporary_storage.unwrap();
             // save the dataseries to the database task
-            let save_dataseries_task = microkeeper::save_dataseries(self.sqlite_pool.clone(), dataseries);
+            let save_dataseries_task = microkeeper::save_dataseries(self.sqlite_pool.clone(), dataseries, expiry);
 
             // block until both tasks are done
             let save_result = self.tokio_handle.block_on(save_dataseries_task);
