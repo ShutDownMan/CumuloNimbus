@@ -5,6 +5,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 extern crate intercom;
+use crate::intercom::HasTypeId;
 
 #[derive(Debug, thiserror::Error)]
 pub struct DatabaseLockError;
@@ -309,9 +310,10 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
     };
 
     info!("attempting to send dataseries to service bus");
+    let type_id = intercom::schemas::persistor_capnp::persist_data_series::Builder::TYPE_ID;
     let publish_status = service_bus
         .intercom_publish("amq.direct", topic,
-        intercom::MessageType::PersistDataSeries, &buffer, compress, priority.into())
+        type_id, &buffer, compress, priority.into())
         .await;
     if let Err(e) = publish_status {
         error!("failed to send dataseries to service bus: {:?}", e);

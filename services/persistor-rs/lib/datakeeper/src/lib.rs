@@ -1,13 +1,14 @@
 use anyhow::Result;
 use sqlx::{postgres::PgPool, Acquire};
 use std::sync::Arc;
-use tracing::{info, debug, error};
+use tracing::{info, debug};
 use sqlx::Row;
 use sqlx::types::chrono::DateTime;
 
 extern crate intercom;
 
 use intercom::schemas;
+use crate::intercom::HasTypeId;
 
 #[derive(sqlx::Type)]
 #[sqlx(type_name = "DataSeriesType")] // This should match the name of the enum type in PostgreSQL
@@ -41,20 +42,22 @@ impl DataKeeper {
 
     pub async fn handle_messages(&self) -> Result<()> {
         let db_pool_clone = self.db_pool.clone();
-        let service_bus_clone = self.service_bus.clone();
+        let _service_bus_clone = self.service_bus.clone();
         let tokio_handle = self.tokio_handle.clone();
 
-        self.service_bus.subscribe("persistor.input", intercom::MessageType::PersistDataSeries, Box::new(move |reader, metadata| {
+        let persist_dataseries_type_id = intercom::schemas::persistor_capnp::persist_data_series::Reader::TYPE_ID;
+        self.service_bus.subscribe("persistor.input", persist_dataseries_type_id, Box::new(move |reader, metadata| {
             debug!("Handling persist data series message");
             let db_pool = db_pool_clone.clone();
-            // let service_bus = service_bus_clone.clone();
+            let _service_bus = _service_bus_clone.clone();
 
             tokio_handle.block_on(async move {
                 Self::handle_persist_data_series(db_pool, reader, metadata).await
             })
         }))?;
 
-        self.service_bus.subscribe("persistor.input", intercom::MessageType::FetchDataSeries, Box::new(move |reader, metadata| {
+        let fetch_dataseries_type_id = intercom::schemas::persistor_capnp::fetch_data_series::Reader::TYPE_ID;
+        self.service_bus.subscribe("persistor.input", fetch_dataseries_type_id, Box::new(move |reader, metadata| {
             debug!("Handling fetch data series message");
 
             Self::handle_fetch_data_series(reader, metadata)
@@ -73,7 +76,7 @@ impl DataKeeper {
         let root = reader.get_root::<schemas::persistor_capnp::persist_data_series::Reader>()?;
         let data_series_id = root.get_id()?;
         let data_series_type = root.get_type()?;
-        let data_series_values = root.get_values()?;
+        let _data_series_values = root.get_values()?;
 
         info!("Persisting data series with id: {:?}", data_series_id);
         debug!("Type: {:?}", data_series_type);
@@ -87,6 +90,7 @@ impl DataKeeper {
     ) -> Result<()> {
         let root = reader.get_root::<schemas::persistor_capnp::fetch_data_series::Reader>()?;
         debug!("Id: {:?}", root.get_id());
+        debug!("Metadata: {:?}", metadata);
 
         Ok(())
     }
@@ -95,24 +99,15 @@ impl DataKeeper {
 pub async fn persist_dataseries_from_message(
     db_pool: Arc<PgPool>,
     reader: intercom::CapnpReader,
-    metadata: intercom::LapinAMQPProperties
+    _metadata: intercom::LapinAMQPProperties
 ) -> Result<()> {
     let root = reader.get_root::<schemas::persistor_capnp::persist_data_series::Reader>()?;
     let data_series_id = root.get_id()?;
-    let data_series_type = root.get_type()?;
+    let data_series_type: schemas::persistor_capnp::persist_data_series::DataType = root.get_type()?;
     let data_series_values = root.get_values()?;
 
     let mut executor = db_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
-
-    // CREATE TYPE DataSeriesType AS ENUM ('numeric', 'text', 'boolean', 'arbitrary', 'jsonb');
-    let numeric_type = match data_series_type {
-        schemas::persistor_capnp::persist_data_series::DataType::Numerical => DataSeriesType::Numeric,
-        schemas::persistor_capnp::persist_data_series::DataType::Text => DataSeriesType::Text,
-        schemas::persistor_capnp::persist_data_series::DataType::Boolean => DataSeriesType::Boolean,
-        schemas::persistor_capnp::persist_data_series::DataType::Arbitrary => DataSeriesType::Arbitrary,
-        // schemas::persistor_capnp::persist_data_series::DataType::Jsonb => DataSeriesType::Jsonb,
-    };
 
     // TODO: do away with this query
     let res = sqlx::query(r#"
@@ -122,7 +117,7 @@ pub async fn persist_dataseries_from_message(
         RETURNING id;
     "#,)
     .bind(uuid::Uuid::parse_str(&data_series_id)?)
-    .bind(numeric_type)
+    .bind(data_series_type as i32)
     .fetch_one(&mut *transaction)
     .await?;
 

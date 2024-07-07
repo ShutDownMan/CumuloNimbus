@@ -14,7 +14,7 @@ chrono = "0.4.38"
 uuid = { version = "1.4.1", features = ["v8"] }
 sha1 = "0.10.5"
 
-intercom = { path = '../intercom' }
+intercom = { path = '../intercom-rs' }
 dispatcher = { path = './lib/dispatcher' }
 mqtt_ingestor = { path = './lib/mqtt_ingestor' }
 housekeeper = { path = './lib/housekeeper' }

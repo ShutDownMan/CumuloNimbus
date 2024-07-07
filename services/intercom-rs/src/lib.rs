@@ -13,12 +13,20 @@ use capnp::message::ReaderOptions;
 
 extern crate num;
 
-#[macro_use]
-extern crate num_derive;
-
 pub mod schemas;
 
 pub use capnp::serialize_packed;
+pub use capnp::traits::HasTypeId;
+
+
+#[derive(Debug, thiserror::Error)]
+pub struct CallbackError;
+
+impl std::fmt::Display for CallbackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Error invoking callback")
+    }
+}
 
 #[derive(Debug)]
 pub enum MessagePriority {
@@ -27,18 +35,11 @@ pub enum MessagePriority {
     Omega = 0,
 }
 
-// TODO: Find a way to create this enum dynamically
-#[derive(Debug, Eq, Hash, PartialEq, FromPrimitive)]
-pub enum MessageType {
-    PersistDataSeries,
-    FetchDataSeries
-}
-
 pub type CapnpBuilder<A> = capnp::message::Builder<A>;
 pub type CapnpReader = capnp::message::Reader<capnp::serialize::OwnedSegments>;
 pub type LapinAMQPProperties = lapin::protocol::basic::AMQPProperties;
 
-type SubscriberType = Arc<Mutex<HashMap<String, HashMap<MessageType, MessageHandlerCallbackType>>>>;
+type SubscriberType = Arc<Mutex<HashMap<String, HashMap<u64, MessageHandlerCallbackType>>>>;
 
 type MessageHandlerCallbackType = Box<dyn Fn(CapnpReader, LapinAMQPProperties) -> Result<()> + Send + 'static>;
 
@@ -159,7 +160,7 @@ impl ServiceBus {
         &self,
         exchange: &str,
         routing_key: &str,
-        message_type: MessageType,
+        message_type_id: u64,
         message: &[u8],
         compress: bool,
         priority: Option<MessagePriority>,
@@ -170,7 +171,7 @@ impl ServiceBus {
         let mut properties = BasicProperties::default();
         let mut headers = FieldTable::default();
 
-        headers.insert("message-type".into(), (message_type as u32).into());
+        headers.insert("message-type".into(), message_type_id.into());
 
         properties = properties.with_headers(headers)
             .with_content_type("application/capnp".into());
@@ -188,7 +189,9 @@ impl ServiceBus {
             debug!("uncompressed message length: {}", message.len());
         }
 
-        properties = properties.with_priority(priority.unwrap_or(MessagePriority::Omega) as u8);
+        properties = properties
+            .with_priority(priority.unwrap_or(MessagePriority::Omega) as u8)
+            .with_delivery_mode(2);
 
         let _confirm = self
             .channel
@@ -204,7 +207,7 @@ impl ServiceBus {
         Ok(())
     }
 
-    pub fn subscribe(&self, topic: &str, message_type: MessageType, callback: MessageHandlerCallbackType) -> Result<()>
+    pub fn subscribe(&self, topic: &str, message_type_id: u64, callback: MessageHandlerCallbackType) -> Result<()>
     {
         let m_topic: String = topic.to_string();
         let m_subscriptions = self.subscriptions.clone();
@@ -214,10 +217,10 @@ impl ServiceBus {
             // check if exists in hashmap
             if let Some(existing_subs) = subs.get_mut(&m_topic) {
                 // if exists, insert into the existing hashmap
-                existing_subs.insert(message_type, callback);
+                existing_subs.insert(message_type_id, callback);
             } else {
                 // if does not exist, create new entry
-                subs.insert(m_topic.clone(), HashMap::from([(message_type, callback)]));
+                subs.insert(m_topic.clone(), HashMap::from([(message_type_id, callback)]));
             }
         }).join();
 
@@ -318,7 +321,8 @@ async fn process_message(
         let new_header = (key, header.1);
 
         match new_header {
-            ("message-type", value) => message_type = value.as_long_uint(),
+            // timestamp is being used because it is a u64
+            ("message-type", value) => message_type = value.as_timestamp(),
             _ => ()
         }
     }
@@ -327,7 +331,7 @@ async fn process_message(
 
     debug!("Message Type: {}", &dbg_message_type);
 
-    // TODO: check if message is really compressed before decoding
+    // check if message is really compressed before decoding
     let data_ref = &delivery.data;
     let body = match properties.content_encoding() {
         Some(encoding) => {
@@ -341,16 +345,25 @@ async fn process_message(
     };
     if let Some(body) = body {
         let metadata = properties.clone();
-        let topic = topic.to_string();
+        let topic_callback = topic.to_string();
         debug!("Handling message");
         let _callback_result = std::thread::spawn(move || {
             let body_slice = &mut &body[..];
-            handle_subscription_callback(subscriptions.clone(), topic, message_type, body_slice, metadata)
+            handle_subscription_callback(subscriptions.clone(), topic_callback, message_type, body_slice, metadata)
         }).join();
 
-        // TODO: send message to dead letter queue if callback fails
         if let Err(e) = _callback_result {
             error!("Error handling message: {:?}", e);
+            match e.downcast_ref::<CallbackError>() {
+                Some(_) => {
+                    debug!("Sending message to dead letter queue");
+                    let _ = delivery.reject(BasicRejectOptions { requeue: false }).await;
+
+                    // TODO: send message to dead letter queue if callback fails
+                    let _dead_letter_queue = format!("{}.dead-letter", topic);
+                },
+                None => ()
+            }
         }
     }
 
@@ -362,7 +375,7 @@ async fn process_message(
 fn handle_subscription_callback(
     subscriptions: SubscriberType,
     topic: String,
-    message_type: Option<u32>,
+    message_type_id: Option<u64>,
     body: &mut &[u8],
     metadata: LapinAMQPProperties
 ) -> Result<()> {
@@ -373,20 +386,21 @@ fn handle_subscription_callback(
 
     debug!("Handling message");
 
-    let message_type = message_type.and_then(num::FromPrimitive::from_u32).ok_or_else(|| anyhow!("Invalid message type"))?;
+    let message_type = message_type_id.and_then(num::FromPrimitive::from_u64).ok_or_else(|| anyhow!("Invalid message type"))?;
     let callback = current_topic_subs.get(&message_type).ok_or_else(|| anyhow!("Message type not found"))?;
 
     debug!("Reading message");
 
     let reader = capnp::serialize_packed::read_message(body, ReaderOptions::new())?;
 
-    debug!("Invoking callback future");
+    debug!("Invoking callback");
     let result = callback(reader, metadata);
 
     debug!("Callback result: {:?}", result);
 
     if let Err(e) = result {
         error!("Error invoking callback: {:?}", e);
+        return Err(CallbackError.into());
     }
 
     Ok(())

@@ -4,7 +4,7 @@ extern crate capnpc;
 
 fn main() {
     println!("list all capnp schemas in folder");
-    let paths = std::fs::read_dir("./capnp").unwrap();
+    let paths = std::fs::read_dir("../intercom/capnp").unwrap();
     let paths = paths.filter_map(|entry| {
         // check if the entry is a file and has .capnp extension
         entry.ok().and_then(|e|
@@ -24,7 +24,7 @@ fn main() {
     for path in paths.clone() {
         let success = capnpc::CompilerCommand::new()
             .file(path)
-            .output_path("./src/schemas")
+            // .output_path("./src/schemas")
             .default_parent_module(vec!["schemas".to_string()])
             .run();
         if let Err(e) = success {
@@ -33,7 +33,7 @@ fn main() {
     }
 
     println!("moving generated files to parent folder");
-    let paths = std::fs::read_dir("./src/schemas/capnp").unwrap();
+    let paths = std::fs::read_dir("../intercom/capnp").unwrap();
     let paths = paths.filter_map(|entry| {
         entry.ok().and_then(|e|
             e.path()
@@ -43,12 +43,9 @@ fn main() {
     for path in paths.clone() {
         let file_name = path::Path::new(&path).file_name().unwrap().to_str().unwrap();
         let new_path = format!("./src/schemas/{}", file_name);
-        print!("moving {:?} to {:?}... ", path, new_path);
+        println!("moving {:?} to {:?}... ", path, new_path);
         std::fs::rename(path, new_path).unwrap();
     }
-
-    println!("removing capnp folder");
-    std::fs::remove_dir_all("./src/schemas/capnp").unwrap();
 
     println!("done");
 }
