@@ -77,3 +77,22 @@ services:
         max-file: "1"
         labels: "production_status"
         env: "os"
+
+  grafana:
+    image: grafana/grafana:latest
+    hostname: grafana
+    restart: unless-stopped
+    ports:
+      - ${GRAFANA_PORT}:3000
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
+    volumes:
+      - ./services/grafana/data:/var/lib/grafana
+    logging:
+      driver: "json-file"
+      options:
+        max-size: 10m
+        max-file: "1"
+        labels: "production_status"
+        env: "os"
