@@ -2,9 +2,6 @@
 
 -- CREATE EXTENSION system_stats;
 
--- Enum with the possible types of data series
-CREATE TYPE DataSeriesType AS ENUM ('numeric', 'text', 'boolean', 'arbitrary', 'jsonb');
-
 -- Create the table to store the data series, externally identified by a UUID and
 -- internally identified by a serial id to save space in the indexes
 CREATE TABLE DataSeries (
@@ -16,8 +13,6 @@ CREATE TABLE DataSeries (
     name TEXT,
     -- Optional description of the data series
     description TEXT,
-    -- Type of the data series
-    type DataSeriesType NOT NULL,
     -- Created and updated at timestamp
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ

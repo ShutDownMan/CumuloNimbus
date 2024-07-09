@@ -10,17 +10,6 @@ extern crate intercom;
 use intercom::schemas;
 use crate::intercom::HasTypeId;
 
-#[derive(sqlx::Type)]
-#[sqlx(type_name = "DataSeriesType")] // This should match the name of the enum type in PostgreSQL
-#[sqlx(rename_all = "lowercase")] // This ensures that the Rust enum variants are converted to lowercase strings
-enum DataSeriesType {
-    Numeric,
-    Text,
-    Boolean,
-    Arbitrary,
-    Jsonb,
-}
-
 pub struct DataKeeper {
     db_pool: Arc<PgPool>,
     service_bus: Arc<intercom::ServiceBus>,
@@ -75,11 +64,9 @@ impl DataKeeper {
     ) -> Result<()> {
         let root = reader.get_root::<schemas::persistor_capnp::persist_data_series::Reader>()?;
         let data_series_id = root.get_id()?;
-        let data_series_type = root.get_type()?;
         let _data_series_values = root.get_values()?;
 
         info!("Persisting data series with id: {:?}", data_series_id);
-        debug!("Type: {:?}", data_series_type);
 
         persist_dataseries_from_message(db_pool, reader, metadata).await
     }
@@ -103,21 +90,20 @@ pub async fn persist_dataseries_from_message(
 ) -> Result<()> {
     let root = reader.get_root::<schemas::persistor_capnp::persist_data_series::Reader>()?;
     let data_series_id = root.get_id()?;
-    let data_series_type: schemas::persistor_capnp::persist_data_series::DataType = root.get_type()?;
     let data_series_values = root.get_values()?;
+
 
     let mut executor = db_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
 
     // TODO: do away with this query
     let res = sqlx::query(r#"
-        INSERT INTO DataSeries (external_id, created_at, type)
-        VALUES ($1, NOW(), $2)
+        INSERT INTO DataSeries (external_id, created_at)
+        VALUES ($1, NOW())
         ON CONFLICT (external_id) DO UPDATE SET updated_at = NOW()
         RETURNING id;
     "#,)
     .bind(uuid::Uuid::parse_str(&data_series_id)?)
-    .bind(data_series_type as i32)
     .fetch_one(&mut *transaction)
     .await?;
 

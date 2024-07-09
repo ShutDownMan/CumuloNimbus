@@ -292,8 +292,6 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
         let mut capnp_dataseries =
             message.init_root::<intercom::schemas::persistor_capnp::persist_data_series::Builder>();
         capnp_dataseries.set_id(&dataseries_id);
-        capnp_dataseries
-            .set_type(intercom::schemas::persistor_capnp::persist_data_series::DataType::Numerical);
         let mut datapoints_builder = capnp_dataseries.init_values(
             dataseries.values.len() as u32);
         for (i, datapoint) in dataseries.values.iter().enumerate() {
@@ -336,8 +334,7 @@ pub async fn mark_datapoints_as_sent(sqlite_pool: Arc<SqlitePool>, datapoint_ids
     let mut executor = sqlite_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
 
-    let query = format!(
-        r#"
+    let query = format!(r#"
         UPDATE DataPoint
         SET sent_at = {}
         WHERE id IN ({});

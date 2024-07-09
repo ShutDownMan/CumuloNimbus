@@ -21,6 +21,7 @@ num = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
 thiserror = "1.0"
+rand = "0.8.5"
 
 [build-dependencies]
 capnpc = "0.17.2"

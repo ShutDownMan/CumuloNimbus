@@ -61,7 +61,7 @@ def main():
         for sensor_id in sensor_ids:
             for magnitude_id in magnitude_ids:
                 noises[(station_id, sensor_id, magnitude_id)] = PerlinNoise(
-                    octaves=2.999, seed=(station_id+sensor_id*10+magnitude_id*100)/100)
+                    octaves=0.03, seed=(station_id+sensor_id*10+magnitude_id*100)/100)
 
     # generate random data
     def generate_data():

@@ -7,7 +7,7 @@ use lapin::{
     message::Delivery, options::*, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties, Consumer
 };
 use std::{io::prelude::*, sync::{Arc, Mutex}};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use std::collections::HashMap;
 use capnp::message::ReaderOptions;
 
@@ -74,9 +74,34 @@ impl ServiceBus {
 
     pub async fn simple_queue_declare(&self, queue_name: &str, routing_key: &str) -> Result<()> {
         info!("declaring queue {}", queue_name);
+        let dead_letter_queue = format!("{}.dead-letter", queue_name);
+        let dead_letter_routing_key = format!("{}.dead-letter", routing_key);
+
+        info!("declaring dead letter queue {}", dead_letter_queue);
+        self.channel
+            .queue_declare(
+                dead_letter_queue.as_str(),
+                QueueDeclareOptions::default(),
+                FieldTable::default(),
+            )
+            .await?;
+
+        info!("binding dead letter queue to exchange");
+        self.channel
+            .queue_bind(
+                dead_letter_queue.as_str(),
+                "amq.direct",
+                dead_letter_routing_key.as_str(),
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await?;
+        info!("Bound dead letter queue");
 
         let mut fields = FieldTable::default();
         fields.insert("x-max-priority".into(), 2.into());
+        fields.insert("x-dead-letter-exchange".into(), lapin::types::AMQPValue::LongString("amq.direct".into()));
+        fields.insert("x-dead-letter-routing-key".into(), lapin::types::AMQPValue::LongString(dead_letter_routing_key.into()));
 
         let queue_declare_options = QueueDeclareOptions {
             durable: true,
@@ -93,11 +118,9 @@ impl ServiceBus {
                 fields,
             )
             .await?;
-
         info!("Declared queue");
 
         info!("binding queue {} to exchange {}", queue_name, routing_key);
-
         self.channel
             .queue_bind(
                 queue_name,
@@ -107,7 +130,6 @@ impl ServiceBus {
                 FieldTable::default(),
             )
             .await?;
-
         info!("Bound queue");
 
         Ok(())
@@ -352,24 +374,34 @@ async fn process_message(
             handle_subscription_callback(subscriptions.clone(), topic_callback, message_type, body_slice, metadata)
         }).join();
 
-        if let Err(e) = _callback_result {
-            error!("Error handling message: {:?}", e);
-            match e.downcast_ref::<CallbackError>() {
-                Some(_) => {
-                    debug!("Sending message to dead letter queue");
-                    let _ = delivery.reject(BasicRejectOptions { requeue: false }).await;
+        match _callback_result {
+            Ok(Ok(_)) => {
+                debug!("Message handled successfully");
 
-                    // TODO: send message to dead letter queue if callback fails
-                    let _dead_letter_queue = format!("{}.dead-letter", topic);
-                },
-                None => ()
+                debug!("Acking message");
+                delivery.ack(BasicAckOptions::default()).await.expect("ack");
+                debug!("Message acked");
+
+            },
+            Ok(Err(e)) => {
+                match e.downcast_ref::<CallbackError>() {
+                    Some(_) => {
+                        warn!("Callback error, sending message to dead letter queue");
+                        let _ = delivery.reject(BasicRejectOptions { requeue: false }).await;
+                    },
+                    None => {
+                        error!("Error handling message: {:?}", e);
+                    }
+                }
+            },
+            Err(e) => {
+                error!("Error with message handler task: {:?}", e);
+
+                warn!("Sending message to dead letter queue");
+                let _ = delivery.reject(BasicRejectOptions { requeue: false }).await;
             }
         }
     }
-
-    debug!("Acking message");
-    delivery.ack(BasicAckOptions::default()).await.expect("ack");
-    debug!("Message acked");
 }
 
 fn handle_subscription_callback(

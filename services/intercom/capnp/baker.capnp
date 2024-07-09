@@ -16,21 +16,22 @@ struct ComputeAndPersistDataSeries @0xdf9bf64da6e19f86 {
     dependencies @3 :List(Text);
 }
 
-struct @0xd8ddc4097cb667c1 StoreRecipe {
+struct StoreRecipe @0xd8ddc4097cb667c1 {
     id @0 :Text;
     recipe @1 :Text;
 
-    temporalStrategy @2 :union {
+    temporalStrategy :union {
         mirror :group {
-            mirroredDataSeriesIds @0 :List(Text);
+            mirroredDataSeriesIds @2 :List(Text);
         }
         fixedInterval :group {
-            interval @1 :union {
-                simpleSchedule @0 :SimpleSchedule;
-                cron @1 :Text;
+            interval :union {
+                iso8601Interval @3 :Text;
+                cron @4 :Text;
             }
         }
     }
+
 }
 
 enum TemporalStrategy {

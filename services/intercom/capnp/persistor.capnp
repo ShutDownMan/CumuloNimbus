@@ -3,8 +3,7 @@
 
 struct PersistDataSeries @0xb1baefc638ce1dc0  {
   id @0 :Text;
-  type @1 :DataType;
-  values @2 :List(DataPoint);
+  values @1 :List(DataPoint);
 
   enum DataType {
     numerical @0;
