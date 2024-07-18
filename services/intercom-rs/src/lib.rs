@@ -17,6 +17,7 @@ pub mod schemas;
 
 pub use capnp::serialize_packed;
 pub use capnp::traits::HasTypeId;
+pub use capnp::traits::FromPointerReader;
 
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +37,7 @@ pub enum MessagePriority {
 }
 
 pub type CapnpBuilder<A> = capnp::message::Builder<A>;
+pub type HeapAllocator = capnp::message::HeapAllocator;
 pub type CapnpReader = capnp::message::Reader<capnp::serialize::OwnedSegments>;
 pub type LapinAMQPProperties = lapin::protocol::basic::AMQPProperties;
 

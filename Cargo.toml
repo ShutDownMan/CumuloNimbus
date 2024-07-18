@@ -9,5 +9,8 @@ members = [
     './services/ingestor-rs/lib/microkeeper',
     './services/persistor-rs',
     './services/persistor-rs/lib/datakeeper',
+#    './services/baker-rs',
+#    './services/baker-rs/lib/recipe_keeper',
+#    './services/baker-rs/lib/processor',
     './services/intercom-rs',
 ]

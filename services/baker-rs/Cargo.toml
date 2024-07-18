@@ -1,0 +1,20 @@
+[package]
+name = "baker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.72"
+tokio = { version = "1.37.0", features = ["full"] }
+sqlx = { version = "0.7.1", features = ["postgres", "sqlite", "runtime-tokio-native-tls"] }
+tracing = "0.1.37"
+tracing-subscriber = {version = "0.3.17", features=["env-filter"]}
+chrono = "0.4.38"
+
+recipe_keeper = { path = './lib/recipe_keeper' }
+processor = { path = './lib/processor' }
+intercom = { path = '../intercom-rs' }
+
+[[bin]]
+name = "baker"
+path = "src/main.rs"

@@ -62,7 +62,7 @@ impl Housekeeper {
             debug!("patience: {}", patience);
             debug!("working: {}", working);
             tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
-            let pending_dataseries = microkeeper::get_pending_dataseries(self.sqlite_pool.clone()).await;
+            let pending_dataseries = microkeeper::get_pending_dataseries_ids(self.sqlite_pool.clone()).await;
             // if we could not lock, decrease the patience and sleep for a while
             let pending_dataseries = match pending_dataseries {
                 Ok(pending_dataseries) => pending_dataseries,
