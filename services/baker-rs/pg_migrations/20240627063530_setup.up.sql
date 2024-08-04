@@ -12,7 +12,7 @@ CREATE TABLE Recipe (
     description TEXT NOT NULL,
 
     simplified_expression TEXT,
-    expression TEXT NOT NULL,
+    wasm_expression TEXT NOT NULL,
 
     temporal_strategy TemporalStrategy NOT NULL,
 

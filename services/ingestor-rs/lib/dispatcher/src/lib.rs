@@ -8,7 +8,11 @@ extern crate intercom;
 
 pub use microkeeper::DataSeries;
 pub use microkeeper::DataPoint;
-pub use microkeeper::DataPointValue;
+pub use microkeeper::NumericDataPoint;
+pub use microkeeper::DataSeriesMetadata;
+pub use intercom::schemas::dataseries_capnp::DataType as DataSeriesDataType;
+
+
 
 pub struct Dispatcher {
     sqlite_pool: Arc<SqlitePool>,
@@ -55,10 +59,10 @@ impl Dispatcher {
         })
     }
 
-    pub fn dispatch_to_persistor(&self, dataseries: &DataSeries, dispath_config: &DispatcherConfig) -> Result<()> {
+    pub fn dispatch_to_persistor(&self, dataseries: &DataSeries<microkeeper::NumericDataPoint>, dispath_config: &DispatcherConfig) -> Result<()> {
         debug!(
             "dispatching dataseries of id {:?}",
-            dataseries.dataseries_id
+            dataseries.metadata.id
         );
 
         if dataseries.values.is_empty() {
@@ -71,7 +75,7 @@ impl Dispatcher {
         let handle = tokio::runtime::Handle::current();
         debug!("tokio handle: {:?}", handle);
 
-        info!("sending dataseries of id {:?}", dataseries.dataseries_id);
+        info!("sending dataseries of id {:?}", dataseries.metadata.id);
         let priority = match dispath_config.dispatch_strategy {
             DispatchStrategy::Realtime => MessagePriority::Beta,
             DispatchStrategy::Batched { .. } => MessagePriority::Omega,
@@ -95,7 +99,7 @@ impl Dispatcher {
         };
 
         if temporary_storage {
-            info!("persisting dataseries of id {:?}", dataseries.dataseries_id);
+            info!("persisting dataseries of id {:?}", dataseries.metadata.id);
             let expiry = dispath_config.temporary_storage.unwrap();
             // save the dataseries to the database task
             let save_dataseries_task = microkeeper::save_dataseries(self.sqlite_pool.clone(), dataseries, expiry);

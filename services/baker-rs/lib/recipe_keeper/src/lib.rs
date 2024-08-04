@@ -58,7 +58,7 @@ impl RecipeKeeper {
 
     async fn handle_persist_recipe(
         db_pool: Arc<PgPool>,
-        reader: intercom::CapnpReader,
+        reader: intercom::CapnpMessageReader,
         metadata: intercom::LapinAMQPProperties
     ) -> Result<()> {
         let root = reader.get_root::<schemas::baker_capnp::store_recipe::Reader>()?;
@@ -70,7 +70,7 @@ impl RecipeKeeper {
     }
 
     fn handle_fetch_recipe(
-        reader: intercom::CapnpReader,
+        reader: intercom::CapnpMessageReader,
         metadata: intercom::LapinAMQPProperties
     ) -> Result<()> {
         let root = reader.get_root::<schemas::baker_capnp::fetch_recipe::Reader>()?;
@@ -83,7 +83,7 @@ impl RecipeKeeper {
 
 pub async fn persist_recipe_from_message(
     db_pool: Arc<PgPool>,
-    reader: intercom::CapnpReader,
+    reader: intercom::CapnpMessageReader,
     _metadata: intercom::LapinAMQPProperties
 ) -> Result<()> {
     let root = reader.get_root::<schemas::baker_capnp::store_recipe::Reader>()?;
@@ -92,7 +92,7 @@ pub async fn persist_recipe_from_message(
     let recipe_description = root.get_description()?;
 
     let simplified_expression = root.get_simplified_expression()?;
-    let expression = root.get_expression()?;
+    let wasm_expression = root.get_wasm_expression()?;
 
     let mut executor = db_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
@@ -107,7 +107,7 @@ pub async fn persist_recipe_from_message(
     .bind(recipe_name)
     .bind(recipe_description)
     .bind(simplified_expression)
-    .bind(expression)
+    .bind(wasm_expression)
     .fetch_one(&mut *transaction)
     .await?;
 

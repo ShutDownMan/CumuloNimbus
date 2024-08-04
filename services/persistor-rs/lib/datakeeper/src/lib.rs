@@ -10,7 +10,10 @@ extern crate intercom;
 use intercom::schemas;
 use crate::intercom::HasTypeId;
 
-type PersistNumericDataSeriesReader<'a> = intercom::schemas::persistor_capnp::persist_data_series::Reader::<'a, schemas::dataseries_capnp::numeric_data_series::Owned>;
+type DataSeriesReader<'a, T> = intercom::schemas::dataseries_capnp::data_series::Reader<'a, T>;
+type NumericDataSeriesReader<'a> = DataSeriesReader<'a, intercom::schemas::dataseries_capnp::numeric_data_point::Owned>;
+type PersistDataSeriesReader<'a, T> = intercom::schemas::persistor_capnp::persist_data_series::Reader<'a, T>;
+type PersistNumericDataSeriesReader<'a> = PersistDataSeriesReader<'a, intercom::schemas::dataseries_capnp::numeric_data_point::Owned>;
 type FetchDataSeriesReader<'a> = intercom::schemas::persistor_capnp::fetch_data_series::Reader<'a>;
 
 pub struct DataKeeper {
@@ -44,7 +47,7 @@ impl DataKeeper {
             let _service_bus = _service_bus_clone.clone();
 
             tokio_handle.block_on(async move {
-                Self::handle_persist_data_series(db_pool, reader, metadata).await
+                Self::handle_persist_numeric_data_series(db_pool, reader, metadata).await
             })
         }))?;
 
@@ -60,28 +63,23 @@ impl DataKeeper {
         Ok(())
     }
 
-    // struct PersistDataSeries(T) {
-    //     dataseries @0 :T;
-    //     options @1 :PersistDataSeriesOptions;
-    // }
-
-    async fn handle_persist_data_series(
+    async fn handle_persist_numeric_data_series(
         db_pool: Arc<PgPool>,
-        reader: intercom::CapnpReader,
+        reader: intercom::CapnpMessageReader,
         metadata: intercom::LapinAMQPProperties
     ) -> Result<()> {
         let root = reader.get_root::<PersistNumericDataSeriesReader>()?;
-        let dataseries: schemas::dataseries_capnp::numeric_data_series::Reader = root.get_dataseries()?;
-        let datataseries_metadata = dataseries.get_metadata()?;
+        let dataseries: NumericDataSeriesReader = root.get_dataseries()?;
+        let datataseries_metadata: intercom::schemas::dataseries_capnp::data_series_metadata::Reader = dataseries.get_metadata()?;
         let dataseries_id = datataseries_metadata.get_id()?;
 
         info!("Persisting data series with id: {:?}", dataseries_id);
 
-        persist_dataseries_from_message(db_pool, reader, metadata).await
+        persist_numeric_dataseries_from_message(db_pool, reader, metadata).await
     }
 
     fn handle_fetch_data_series(
-        reader: intercom::CapnpReader,
+        reader: intercom::CapnpMessageReader,
         metadata: intercom::LapinAMQPProperties
     ) -> Result<()> {
         let root = reader.get_root::<schemas::persistor_capnp::fetch_data_series::Reader>()?;
@@ -92,14 +90,14 @@ impl DataKeeper {
     }
 }
 
-pub async fn persist_dataseries_from_message(
+pub async fn persist_numeric_dataseries_from_message(
     db_pool: Arc<PgPool>,
-    reader: intercom::CapnpReader,
+    reader: intercom::CapnpMessageReader,
     _metadata: intercom::LapinAMQPProperties
 ) -> Result<()> {
     let root = reader.get_root::<PersistNumericDataSeriesReader>()?;
-    let dataseries: schemas::dataseries_capnp::numeric_data_series::Reader = root.get_dataseries()?;
-    let datataseries_metadata = dataseries.get_metadata()?;
+    let dataseries: NumericDataSeriesReader = root.get_dataseries()?;
+    let datataseries_metadata: intercom::schemas::dataseries_capnp::data_series_metadata::Reader = dataseries.get_metadata()?;
     let dataseries_id = datataseries_metadata.get_id()?;
     let dataseries_data = dataseries.get_values()?;
 
@@ -124,29 +122,32 @@ pub async fn persist_dataseries_from_message(
     let mut zipped_values = vec![];
     for data_point in dataseries_data.iter() {
         let timestamp = data_point.get_timestamp();
-        let data = data_point.get_value();
+        let data = match data_point.get_value() {
+            Ok(value) => Some(value.get_numeric()),
+            Err(_) => None,
+        };
 
         let timestamp = DateTime::from_timestamp(timestamp / 1_000_000_000, (timestamp % 1_000_000_000) as u32);
 
         zipped_values.push((timestamp, data));
     }
     // filter out None values
-    zipped_values.retain(|(timestamp, _)| timestamp.is_some());
+    zipped_values.retain(|(timestamp, data)| timestamp.is_some() && data.is_some());
 
-    // let dataseries_ids = vec![dataseries_id; zipped_values.len()];
-    // let timestamps = zipped_values.iter().map(|(timestamp, _)| *timestamp).collect::<Vec<_>>();
-    // let values = zipped_values.iter().map(|(_, value)| *value).collect::<Vec<_>>();
-    // let query = sqlx::query(r#"
-    //     INSERT INTO DataPointNumeric (dataseries_id, timestamp, value)
-    //     SELECT * FROM UNNEST($1::int[], $2::timestamptz[], $3::float8[])
-    //     ON CONFLICT (dataseries_id, timestamp) DO NOTHING;
-    // "#)
-    // .bind(dataseries_ids)
-    // .bind(timestamps)
-    // .bind(values)
-    // .execute(&mut *transaction);
+    let dataseries_ids = vec![dataseries_id; zipped_values.len()];
+    let timestamps = zipped_values.iter().map(|(timestamp, _)| *timestamp).collect::<Vec<_>>();
+    let values = zipped_values.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+    let query = sqlx::query(r#"
+        INSERT INTO DataPointNumeric (dataseries_id, timestamp, value)
+        SELECT * FROM UNNEST($1::int[], $2::timestamptz[], $3::float8[])
+        ON CONFLICT (dataseries_id, timestamp) DO NOTHING;
+    "#)
+    .bind(dataseries_ids)
+    .bind(timestamps)
+    .bind(values)
+    .execute(&mut *transaction);
 
-    // query.await?;
+    query.await?;
 
     info!("Persisted data series with id: {:?}", dataseries_id);
 

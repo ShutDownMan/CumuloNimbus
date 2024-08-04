@@ -1,17 +1,15 @@
 use anyhow::{bail, Result};
-use intercom::schemas;
 use tracing::{debug, error, info, warn};
 use sqlx::{Row, sqlite::SqlitePool, Acquire};
 use std::sync::Arc;
 use uuid::Uuid;
 
-
 extern crate intercom;
 use crate::intercom::HasTypeId;
 
-// type NumericDataSeriesReader<'a> = intercom::schemas::dataseries_capnp::numeric_data_series::Reader<'a>;
-// type NumericDataSeriesBuilder<'a> = intercom::schemas::dataseries_capnp::numeric_data_series::Builder<'a>;
-type PersistNumericDataSeriesBuilder<'a> = intercom::schemas::persistor_capnp::persist_data_series::Builder<'a, intercom::schemas::dataseries_capnp::numeric_data_series::Owned>;
+type DataPointBuilder<'a, T> = intercom::schemas::dataseries_capnp::data_point::Builder<'a, T>;
+type PersistDataSeriesBuilder<'a, T> = intercom::schemas::persistor_capnp::persist_data_series::Builder<'a, T>;
+type PersistNumericDataSeriesBuilder<'a> = PersistDataSeriesBuilder<'a, intercom::schemas::dataseries_capnp::numeric_data_point::Owned>;
 
 #[derive(Debug, thiserror::Error)]
 pub struct DatabaseLockError;
@@ -31,10 +29,10 @@ where T: DataPointType {
 
 #[derive(Clone, Debug)]
 pub struct DataSeriesMetadata {
-    id: Uuid,
-    name: String,
-    description: String,
-    data_type: intercom::schemas::dataseries_capnp::DataType,
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub data_type: intercom::schemas::dataseries_capnp::DataType,
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +47,9 @@ pub trait DataPointType: Sized + Clone + std::fmt::Debug {
     fn encode(&self) -> String;
     fn decode<'r, DB: sqlx::Database>(value: <DB as sqlx::database::HasValueRef<'r>>::ValueRef) -> Result<Self>
     where &'r str: sqlx::Decode<'r, DB>;
+
+    fn try_get_numerical(&self) -> Result<f64>;
+    fn try_get_text(&self) -> Result<String>;
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +70,14 @@ impl DataPointType for NumericDataPoint {
         Ok(NumericDataPoint {
             numeric: value.parse()?,
         })
+    }
+
+    fn try_get_numerical(&self) -> Result<f64> {
+        Ok(self.numeric)
+    }
+
+    fn try_get_text(&self) -> Result<String> {
+        bail!("numeric datapoint should not be converted to text value");
     }
 }
 
@@ -91,9 +100,37 @@ impl DataPointType for TextDataPoint {
             text: value.to_string(),
         })
     }
+
+    fn try_get_numerical(&self) -> Result<f64> {
+        bail!("text datapoint should not be converted to numerical value");
+    }
+
+    fn try_get_text(&self) -> Result<String> {
+        Ok(self.text.clone())
+    }
 }
 
-pub async fn save_dataseries<T>(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeries<impl DataPointType>, expiration: chrono::Duration) -> Result<Vec<i64>> {
+pub trait DataPointSetter {
+    fn set(&mut self, datapoint: &DataPoint<impl DataPointType>) -> Result<()>;
+}
+
+impl DataPointSetter for DataPointBuilder<'_, intercom::schemas::dataseries_capnp::numeric_data_point::Owned> {
+    fn set(&mut self, datapoint: &DataPoint<impl DataPointType>) -> Result<()> {
+        let timestamp = datapoint.timestamp.timestamp_nanos_opt();
+        let value = datapoint.value.try_get_numerical()?;
+
+        if timestamp.is_none() {
+            bail!("invalid timestamp");
+        }
+
+        self.reborrow().set_timestamp(timestamp.unwrap());
+        self.reborrow().init_value().set_numeric(value);
+
+        Ok(())
+    }
+}
+
+pub async fn save_dataseries(sqlite_pool: Arc<SqlitePool>, dataseries: &DataSeries<impl DataPointType>, expiration: chrono::Duration) -> Result<Vec<i64>> {
     // this time we will save as much as possible in a single statement
     info!("saving dataseries of id {:?}", dataseries.metadata.id);
 
@@ -196,11 +233,10 @@ pub async fn get_pending_dataseries_ids(sqlite_pool: Arc<SqlitePool>) -> Result<
     Ok(dataseries_ids.iter().map(|id| uuid::Uuid::parse_str(id).unwrap()).collect())
 }
 
-pub async fn send_pending_datapoints(sqlite_pool: Arc<SqlitePool>, service_bus: Arc<intercom::ServiceBus>, dataseries_id: &uuid::Uuid, realtime: bool) -> Result<()> {
+pub async fn send_pending_numeric_datapoints(sqlite_pool: Arc<SqlitePool>, service_bus: Arc<intercom::ServiceBus>, dataseries_id: &uuid::Uuid, realtime: bool) -> Result<()> {
     loop {
         // get the pending datapoints for the dataseries
-        tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
-        let pending_datapoints = get_pending_datapoints(sqlite_pool.clone(), dataseries_id).await?;
+        let pending_datapoints = get_pending_datapoints::<NumericDataPoint>(sqlite_pool.clone(), dataseries_id).await?;
         // if there are no pending datapoints, we break the loop
         if pending_datapoints.values.is_empty() {
             info!("no pending datapoints found for dataseries {:?}", dataseries_id);
@@ -215,17 +251,17 @@ pub async fn send_pending_datapoints(sqlite_pool: Arc<SqlitePool>, service_bus: 
             .map(|datapoint| datapoint.id)
             .collect();
         // mark the datapoints as sent in the database
-        tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
         mark_datapoints_as_sent(sqlite_pool.clone(), &datapoint_ids).await?;
     }
 
     Ok(())
 }
 
-async fn get_pending_datapoints<T>(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uuid::Uuid) -> Result<DataSeries<T>>
+async fn get_pending_datapoints<T>(sqlite_pool: Arc<SqlitePool>, dataseries_id: &uuid::Uuid) -> Result<DataSeries<impl DataPointType>>
 where T: DataPointType {
     // get the pending datapoints for the dataseries from the database
     info!("fetching database connection to get pending datapoints");
+    tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
     let executor = sqlite_pool.try_acquire();
     if let None = executor {
         warn!("could not acquire database connection");
@@ -250,7 +286,7 @@ where T: DataPointType {
     let count = rows.len();
     debug!("fetched {} datapoints", count);
 
-    let mut datapoints = get_datapoints_from_rows::<T>(&mut rows).await?;
+    let datapoints = get_datapoints_from_rows::<T>(&mut rows).await?;
 
     transaction.commit().await?;
 
@@ -267,6 +303,7 @@ where T: DataPointType {
 
 async fn get_datapoints_from_rows<'r, T>(rows: &mut Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<DataPoint<T>>>
 where T: DataPointType {
+    // TODO: discover T from datapoint type
     let mut datapoints = Vec::new();
 
     for row in rows.drain(..) {
@@ -293,7 +330,7 @@ where T: DataPointType {
     Ok(datapoints)
 }
 
-pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseries: &DataSeries<NumericDataPoint>, topic: &str,
+pub async fn publish_numeric_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseries: &DataSeries<NumericDataPoint>, topic: &str,
     priority: intercom::MessagePriority, compress: bool) -> Result<()> {
     if dataseries.values.is_empty() {
         info!("no datapoints to publish for dataseries {:?}", dataseries.metadata.id);
@@ -312,23 +349,28 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
         let capnp_persist_dataseries = message.init_root::<PersistNumericDataSeriesBuilder>();
         let mut capnp_dataseries = capnp_persist_dataseries.init_dataseries();
 
-        let mut capnp_dataseries_metadata = capnp_dataseries.reborrow().init_metadata();
-        capnp_dataseries_metadata.set_id(&dataseries_id);
-        drop(capnp_dataseries_metadata);
+        {
+            let mut capnp_dataseries_metadata = capnp_dataseries.reborrow().init_metadata();
+            capnp_dataseries_metadata.set_id(&dataseries_id);
+            capnp_dataseries_metadata.set_name(&dataseries.metadata.name);
+            capnp_dataseries_metadata.set_description(&dataseries.metadata.description);
+            capnp_dataseries_metadata.set_data_type(dataseries.metadata.data_type);
+        }
 
         let mut capnp_dataseries_data = capnp_dataseries.reborrow().init_values(count as u32);
 
         for (i, datapoint) in dataseries.values.iter().enumerate() {
             let timestamp = datapoint.timestamp.timestamp_nanos_opt();
             let value = datapoint.value.numeric;
+
             if timestamp.is_none() {
                 error!("invalid datapoint: {:?}", datapoint);
                 continue;
             }
 
             let mut datapoint_builder = capnp_dataseries_data.reborrow().get(i as u32);
-
             datapoint_builder.set_timestamp(timestamp.unwrap());
+
             let mut value_builder = datapoint_builder.reborrow().init_value();
             value_builder.set_numeric(value);
         }
@@ -354,6 +396,62 @@ pub async fn publish_dataseries(service_bus: Arc<intercom::ServiceBus>, dataseri
     Ok(())
 }
 
+pub async fn publish_dataseries<T>(service_bus: Arc<intercom::ServiceBus>, dataseries: &DataSeries<impl DataPointType>, topic: &str,
+    priority: intercom::MessagePriority, compress: bool) -> Result<()>
+where T: intercom::traits::Owned, for<'a> DataPointBuilder<'a, T>: DataPointSetter {
+    if dataseries.values.is_empty() {
+        info!("no datapoints to publish for dataseries {:?}", dataseries.metadata.id);
+        return Ok(());
+    }
+    info!("publishing dataseries to service bus");
+
+    let dataseries_id = dataseries.metadata.id.to_string();
+
+    info!("publishing {} datapoints for dataseries {:?}", dataseries.values.len(), dataseries_id);
+
+    info!("transforming dataseries into bytearray with capnp");
+    let buffer: Vec<u8> = {
+        let count = dataseries.values.len();
+        let mut message = intercom::CapnpBuilder::new_default();
+        let capnp_persist_dataseries = message.init_root::<PersistDataSeriesBuilder<T>>();
+        let mut capnp_dataseries = capnp_persist_dataseries.init_dataseries();
+
+        {
+            let mut capnp_dataseries_metadata = capnp_dataseries.reborrow().init_metadata();
+            capnp_dataseries_metadata.set_id(&dataseries_id);
+            capnp_dataseries_metadata.set_name(&dataseries.metadata.name);
+            capnp_dataseries_metadata.set_description(&dataseries.metadata.description);
+            capnp_dataseries_metadata.set_data_type(dataseries.metadata.data_type);
+        }
+
+        let mut capnp_dataseries_data = capnp_dataseries.reborrow().init_values(count as u32);
+
+        for (i, datapoint) in dataseries.values.iter().enumerate() {
+            let mut datapoint_builder = capnp_dataseries_data.reborrow().get(i as u32);
+            datapoint_builder.set(datapoint)?;
+        }
+
+        let mut buffer = Vec::new();
+        intercom::serialize_packed::write_message(&mut buffer, &message)?;
+
+        buffer
+    };
+
+    info!("attempting to send dataseries to service bus");
+    let type_id = PersistDataSeriesBuilder::<T>::TYPE_ID;
+    let publish_status = service_bus
+        .intercom_publish("amq.direct", topic,
+        type_id, &buffer, compress, priority.into())
+        .await;
+    if let Err(e) = publish_status {
+        error!("failed to send dataseries to service bus: {:?}", e);
+        return Err(e);
+    }
+    info!("dataseries {} sent to service bus", dataseries_id);
+
+    Ok(())
+}
+
 pub async fn mark_datapoints_as_sent(sqlite_pool: Arc<SqlitePool>, datapoint_ids: &Vec<i64>) -> Result<()> {
     if datapoint_ids.is_empty() {
         info!("no datapoints to mark as sent");
@@ -363,6 +461,7 @@ pub async fn mark_datapoints_as_sent(sqlite_pool: Arc<SqlitePool>, datapoint_ids
     info!("marking {} datapoints as sent", datapoint_ids.len());
 
     info!("fetching database connection to mark datapoints as sent");
+    tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
     let mut executor = sqlite_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
 

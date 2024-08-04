@@ -17,8 +17,10 @@ pub mod schemas;
 
 pub use capnp::serialize_packed;
 pub use capnp::traits::HasTypeId;
-pub use capnp::traits::FromPointerReader;
+pub use capnp::traits;
+pub use capnp::any_pointer;
 
+pub trait CapnpReader<'a>: capnp::traits::FromPointerReader<'a> + capnp::traits::SetPointerBuilder {}
 
 #[derive(Debug, thiserror::Error)]
 pub struct CallbackError;
@@ -38,12 +40,12 @@ pub enum MessagePriority {
 
 pub type CapnpBuilder<A> = capnp::message::Builder<A>;
 pub type HeapAllocator = capnp::message::HeapAllocator;
-pub type CapnpReader = capnp::message::Reader<capnp::serialize::OwnedSegments>;
+pub type CapnpMessageReader = capnp::message::Reader<capnp::serialize::OwnedSegments>;
 pub type LapinAMQPProperties = lapin::protocol::basic::AMQPProperties;
 
 type SubscriberType = Arc<Mutex<HashMap<String, HashMap<u64, MessageHandlerCallbackType>>>>;
 
-type MessageHandlerCallbackType = Box<dyn Fn(CapnpReader, LapinAMQPProperties) -> Result<()> + Send + 'static>;
+type MessageHandlerCallbackType = Box<dyn Fn(CapnpMessageReader, LapinAMQPProperties) -> Result<()> + Send + 'static>;
 
 pub struct ServiceBus {
     _connection: Connection,

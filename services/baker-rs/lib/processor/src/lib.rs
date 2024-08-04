@@ -6,79 +6,65 @@ use sqlx::Row;
 use uuid::Uuid;
 use sqlx::types::chrono::DateTime;
 use wasmtime::*;
+use std::collections::HashMap;
 
 extern crate intercom;
 
 use intercom::schemas;
 use crate::intercom::HasTypeId;
 
-#[derive(Clone, Debug)]
-pub struct DataSeries {
-    pub dataseries_id: Uuid,
-    pub alias: String,
-    pub values: Vec<DataPoint>,
+type DataSeriesReader<'a, T> = intercom::schemas::dataseries_capnp::data_series::Reader<'a, T>;
+type NumericDataSeriesReader<'a> = DataSeriesReader<'a, intercom::schemas::dataseries_capnp::numeric_data_point::Owned>;
+type ComputeDataSeriesReader<'a, T> = intercom::schemas::baker_capnp::compute_data_series::Reader<'a, T>;
+type ComputeNumericDataSeriesReader<'a> = ComputeDataSeriesReader<'a, intercom::schemas::dataseries_capnp::numeric_data_point::Owned>;
+
+pub trait DataPointType: Sized + Clone + std::fmt::Debug {
+    // fn encode(&self) -> String;
+    // fn decode<'r, DB: sqlx::Database>(value: <DB as sqlx::database::HasValueRef<'r>>::ValueRef) -> Result<Self>
+    // where &'r str: sqlx::Decode<'r, DB>;
+
+    // fn try_get_numerical(&self) -> Result<f64>;
+    // fn try_get_text(&self) -> Result<String>;
 }
 
 #[derive(Clone, Debug)]
-pub struct DataPoint {
+pub struct DataSeries<T>
+where T: DataPointType {
+    pub metadata: DataSeriesMetadata,
+    pub values: Vec<DataPoint<T>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DataSeriesMetadata {
+    pub external_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub data_type: intercom::schemas::dataseries_capnp::DataType,
+    pub interpolation_strategy: intercom::schemas::baker_capnp::InterpolationStrategy,
+    pub time_window: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct DataPoint<T>
+where T: DataPointType {
     pub id: i64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub value: DataPointValue,
+    pub value: T,
 }
 
 #[derive(Clone, Debug)]
-pub enum DataPointValue {
-    Numeric(f64),
-    Text(String),
-    Boolean(bool),
-    Arbitrary(Vec<u8>),
-    // Jsonb(serde_json::Value),
+pub struct NumericDataPoint {
+    pub numeric: f64,
 }
 
-trait DataPointValueTrait {
-    fn try_get_numerical(&self) -> Result<f64>;
-    // fn try_get_text(&self) -> Result<&String>;
-    // fn try_get_boolean(&self) -> Result<bool>;
-    // fn try_get_arbitrary(&self) -> Result<&Vec<u8>>;
-    // fn try_get_jsonb(&self) -> Result<serde_json::Value>;
+impl DataPointType for NumericDataPoint {}
+
+#[derive(Clone, Debug)]
+pub struct TextDataPoint {
+    pub text: String,
 }
 
-impl DataPointValueTrait for DataPointValue {
-    fn try_get_numerical(&self) -> Result<f64> {
-        match self {
-            DataPointValue::Numeric(value) => Ok(*value),
-            _ => Err(anyhow::anyhow!("DataPointValue is not Numeric")),
-        }
-    }
-
-    // fn try_get_text(&self) -> Result<&String> {
-    //     match self {
-    //         DataPointValue::Text(value) => Ok(value),
-    //         _ => Err(anyhow::anyhow!("DataPointValue is not Text")),
-    //     }
-    // }
-
-    // fn try_get_boolean(&self) -> Result<bool> {
-    //     match self {
-    //         DataPointValue::Boolean(value) => Ok(*value),
-    //         _ => Err(anyhow::anyhow!("DataPointValue is not Boolean")),
-    //     }
-    // }
-
-    // fn try_get_arbitrary(&self) -> Result<&Vec<u8>> {
-    //     match self {
-    //         DataPointValue::Arbitrary(value) => Ok(value),
-    //         _ => Err(anyhow::anyhow!("DataPointValue is not Arbitrary")),
-    //     }
-    // }
-
-    // fn try_get_jsonb(&self) -> Result<serde_json::Value> {
-    //     match self {
-    //         DataPointValue::Jsonb(value) => Ok(value.clone()),
-    //         _ => Err(anyhow::anyhow!("DataPointValue is not Jsonb")),
-    //     }
-    // }
-}
+impl DataPointType for TextDataPoint {}
 
 pub struct Processor {
     pg_pool: Arc<PgPool>,
@@ -107,7 +93,7 @@ impl Processor {
         let _service_bus_clone = self.service_bus.clone();
         let tokio_handle = self.tokio_handle.clone();
 
-        let store_recipe_type_id = intercom::schemas::baker_capnp::compute_data_series::Reader::TYPE_ID;
+        let store_recipe_type_id = ComputeNumericDataSeriesReader::TYPE_ID;
         self.service_bus.subscribe("baker.input", store_recipe_type_id, Box::new(move |reader, metadata| {
             debug!("Handling compute data series message");
             let pg_pool = pg_pool_clone.clone();
@@ -125,7 +111,7 @@ impl Processor {
 
 async fn handle_persist_recipe(
     db_pool: Arc<PgPool>,
-    reader: intercom::CapnpReader,
+    reader: intercom::CapnpMessageReader,
     metadata: intercom::LapinAMQPProperties
 ) -> Result<()> {
     let root = reader.get_root::<schemas::baker_capnp::store_recipe::Reader>()?;
@@ -138,7 +124,7 @@ async fn handle_persist_recipe(
 
 pub async fn persist_recipe_from_message(
     db_pool: Arc<PgPool>,
-    reader: intercom::CapnpReader,
+    reader: intercom::CapnpMessageReader,
     _metadata: intercom::LapinAMQPProperties
 ) -> Result<()> {
     let root = reader.get_root::<schemas::baker_capnp::store_recipe::Reader>()?;
@@ -147,7 +133,7 @@ pub async fn persist_recipe_from_message(
     let recipe_description = root.get_description()?;
 
     let simplified_expression = root.get_simplified_expression()?;
-    let expression = root.get_expression()?;
+    let wasm_expression = root.get_wasm_expression()?;
 
     let mut executor = db_pool.acquire().await?;
     let mut transaction = executor.begin().await?;
@@ -162,7 +148,7 @@ pub async fn persist_recipe_from_message(
     .bind(recipe_name)
     .bind(recipe_description)
     .bind(simplified_expression)
-    .bind(expression)
+    .bind(wasm_expression)
     .fetch_one(&mut *transaction)
     .await?;
 
@@ -179,23 +165,10 @@ pub async fn persist_recipe_from_message(
 
 async fn handle_compute_data_series(
     db_pool: Arc<PgPool>,
-    reader: intercom::CapnpReader,
+    reader: intercom::CapnpMessageReader,
     metadata: intercom::LapinAMQPProperties
 ) -> Result<()> {
-    let root = reader.get_root::<schemas::baker_capnp::compute_data_series::Reader>()?;
-    let recipe_id = root.get_id()?;
-
-    info!("Computing data series with id: {:?}", recipe_id);
-
-    compute_data_series_from_message(db_pool, reader, metadata).await
-}
-
-pub async fn compute_data_series_from_message(
-    db_pool: Arc<PgPool>,
-    reader: intercom::CapnpReader,
-    _metadata: intercom::LapinAMQPProperties
-) -> Result<()> {
-    let root = reader.get_root::<schemas::baker_capnp::compute_data_series::Reader::<schemas::dataseries_capnp::numeric_data_series::Owned>>()?;
+    let root = reader.get_root::<ComputeNumericDataSeriesReader>()?;
     let recipe_id = root.get_id()?;
     let dependencies = root.get_dependencies()?;
 
@@ -232,53 +205,15 @@ pub async fn compute_data_series_from_message(
         (dataseries_external_id, alias)
     }).collect::<std::collections::HashMap<Uuid, String>>();
 
-    let mut dataseries = vec![];
-    for dependency in dependencies.iter() {
-        let dataseries_id = dependency.get_id()?;
-        let data_series_values = dependency.get_values()?;
-
-        let dataseries_id = Uuid::parse_str(&dataseries_id)?;
-
-        let alias = alias_map.get(&dataseries_id)
-            .context("Alias not found for data series")?;
-
-        let mut data_points = vec![];
-        for data_point in data_series_values.iter() {
-            let timestamp = data_point.get_timestamp();
-            let value = data_point.get_data();
-
-            let timestamp = DateTime::from_timestamp(timestamp / 1_000_000_000, (timestamp % 1_000_000_000) as u32).unwrap();
-
-            let numerical_value = match value.which()? {
-                schemas::dataseries_capnp::data_point::data::Numerical(value) => value,
-                _ => todo!("Handle other data types"),
-            };
-
-            let data_point = DataPoint {
-                id: 0,
-                timestamp,
-                value: DataPointValue::Numeric(numerical_value),
-            };
-
-            data_points.push(data_point);
-        }
-
-        let data_series = DataSeries {
-            dataseries_id,
-            alias: alias.to_string(),
-            values: data_points,
-        };
-
-        dataseries.push(data_series);
-    }
-
     Ok(())
 }
 
 
-
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+    use tracing::field::debug;
+
     use super::*;
 
     #[test]
@@ -287,13 +222,13 @@ mod tests {
         assert_eq!(result, 4);
     }
 
-    struct MyState {
-        name: String,
-        count: usize,
-    }
-
     #[test]
     fn learning_wasm() -> Result<()> {
+        struct MyState {
+            name: String,
+            count: usize,
+        }
+
         // First the wasm module needs to be compiled. This is done with a global
         // "compilation environment" within an `Engine`. Note that engines can be
         // further configured through `Config` if desired instead of using the
@@ -352,4 +287,431 @@ mod tests {
         println!("Done.");
         Ok(())
     }
+
+    struct MyState {
+        dataseries: HashMap<i64, DataSeries<NumericDataPoint>>,
+    }
+
+    /*
+        extern int64_t _get_dataseries_id_by_alias(const char* id);
+        extern int64_t _copy_dataseries(int64_t dataseries_id);
+        extern int64_t _set_interpolation_strategy(int64_t dataseries_id, int64_t interpolation_strategy);
+        extern int64_t _set_time_window(int64_t dataseries_id, int64_t time_window);
+        extern int64_t _add(int64_t dataseries_a_id, int64_t dataseries_b_id);
+        extern int64_t _mirroring(int64_t dataseries_id, int64_t reference_dataseries_ids[], int32_t reference_dataseries_ids_count);
+        extern void _set_result_dataseries(int64_t dataseries_id);
+    */
+    impl MyState {
+        fn get_dataseries_id_by_alias(&self, alias: &str) -> Option<i64> {
+            self.dataseries.iter().find(|(_, ds)| ds.metadata.name == alias).map(|(id, _)| id.clone())
+        }
+
+        fn copy_dataseries(&mut self, dataseries_id: i64) -> i64 {
+            let dataseries = self.dataseries.get(&dataseries_id).unwrap();
+            let new_dataseries = DataSeries {
+                metadata: dataseries.metadata.clone(),
+                values: dataseries.values.clone(),
+            };
+            let new_id = self.dataseries.len() as i64 + 1;
+            self.dataseries.insert(new_id, new_dataseries);
+            new_id
+        }
+
+        fn set_interpolation_strategy(&mut self, dataseries_id: i64, interpolation_strategy: i64) -> i64 {
+            let dataseries = self.dataseries.get_mut(&dataseries_id).unwrap();
+            dataseries.metadata.interpolation_strategy = match interpolation_strategy {
+                1 => intercom::schemas::baker_capnp::InterpolationStrategy::Locf,
+                2 => intercom::schemas::baker_capnp::InterpolationStrategy::Lerp,
+                _ => intercom::schemas::baker_capnp::InterpolationStrategy::NoInterpolation,
+            };
+            dataseries_id
+        }
+
+        fn set_time_window(&mut self, dataseries_id: i64, time_window: u64) -> i64 {
+            let dataseries = self.dataseries.get_mut(&dataseries_id).unwrap();
+            dataseries.metadata.time_window = time_window;
+            dataseries_id
+        }
+
+        fn get_value(&self, dataseries_id: i64, timestamp: DateTime<chrono::Utc>) -> Option<f64> {
+            let dataseries = self.dataseries.get(&dataseries_id).unwrap();
+            let value = match dataseries.metadata.interpolation_strategy {
+                intercom::schemas::baker_capnp::InterpolationStrategy::Locf => {
+                    let mut last = None;
+                    for dp in dataseries.values.iter() {
+                        if dp.timestamp <= timestamp {
+                            last = Some(dp);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    match last {
+                        Some(last) => {
+                            let time_distance = timestamp.timestamp_nanos() - last.timestamp.timestamp_nanos();
+                            let time_window = dataseries.metadata.time_window;
+
+                            println!("Time distance: {:?}", time_distance);
+                            println!("Time window: {:?}", time_window);
+
+                            if time_distance <= time_window.try_into().unwrap() {
+                                Some(last.value.numeric)
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    }
+                },
+                intercom::schemas::baker_capnp::InterpolationStrategy::Lerp => {
+                    let mut lower = None;
+                    let mut upper = None;
+                    for dp in dataseries.values.iter() {
+                        if dp.timestamp <= timestamp {
+                            lower = Some(dp);
+                        } else {
+                            upper = Some(dp);
+                            break;
+                        }
+                    }
+
+                    match (lower, upper) {
+                        (Some(lower), Some(upper)) => {
+                            let lower_value = lower.value.numeric;
+                            let upper_value = upper.value.numeric;
+                            let lower_timestamp = lower.timestamp;
+                            let upper_timestamp = upper.timestamp;
+                            let time_diff = upper_timestamp - lower_timestamp;
+                            let value_diff = upper_value - lower_value;
+                            let time_diff_seconds = time_diff.num_seconds() as f64;
+                            let time_diff_total_seconds = time_diff_seconds + time_diff.num_microseconds().unwrap() as f64 / 1_000_000.0;
+                            let time_diff_ratio = (timestamp - lower_timestamp).num_seconds() as f64 + (timestamp - lower_timestamp).num_microseconds().unwrap() as f64 / 1_000_000.0;
+                            let value_diff_ratio = value_diff * time_diff_ratio / time_diff_total_seconds;
+                            Some(lower_value + value_diff_ratio)
+                        },
+                        (Some(lower), None) => Some(lower.value.numeric),
+                        (None, Some(upper)) => Some(upper.value.numeric),
+                        (None, None) => None,
+                    }
+                },
+                _ => {
+                    println!("No interpolation strategy");
+
+                    None
+                },
+            };
+
+            value
+        }
+
+        fn add(&mut self, dataseries_a_id: i64, dataseries_b_id: i64) -> i64 {
+            let dataseries_a = self.dataseries.get(&dataseries_a_id).unwrap();
+            let dataseries_b = self.dataseries.get(&dataseries_b_id).unwrap();
+
+            let mut new_timestamps = vec![];
+            for dp in dataseries_a.values.iter() {
+                new_timestamps.push(dp.timestamp);
+            }
+            for dp in dataseries_b.values.iter() {
+                new_timestamps.push(dp.timestamp);
+            }
+            new_timestamps.sort();
+            new_timestamps.dedup();
+
+            let mut new_values = vec![];
+            for timestamp in new_timestamps.iter() {
+                let value_a = self.get_value(dataseries_a_id, *timestamp);
+                let value_b = self.get_value(dataseries_b_id, *timestamp);
+                match (value_a, value_b) {
+                    (Some(value_a), Some(value_b)) => {
+                        new_values.push(DataPoint {
+                            id: 0,
+                            timestamp: *timestamp,
+                            value: NumericDataPoint {
+                                numeric: value_a + value_b,
+                            }
+                        });
+                    },
+                    _ => {
+                        println!("No value found for timestamp: {:?}", timestamp);
+                    }
+                }
+            }
+
+            let new_dataseries = DataSeries {
+                metadata: DataSeriesMetadata {
+                    external_id: Uuid::nil(),
+                    name: "result".to_string(),
+                    description: "result dataseries".to_string(),
+                    data_type: intercom::schemas::dataseries_capnp::DataType::Numeric,
+                    interpolation_strategy: intercom::schemas::baker_capnp::InterpolationStrategy::NoInterpolation,
+                    time_window: 0,
+                },
+                values: new_values,
+            };
+
+            let new_id = self.dataseries.len() as i64 + 1;
+            self.dataseries.insert(new_id, new_dataseries);
+
+            println!("Result dataseries id: {:?}", new_id);
+            new_id
+        }
+
+        // update the dataseries to mirror the timestamps of the reference dataseries using the interpolation strategy
+        fn mirroring(&mut self, dataseries_id: i64, reference_dataseries_ids: Vec<i64>) -> i64 {
+            println!("Mirroring dataseries in state...");
+            let reference_dataseries = reference_dataseries_ids.iter()
+                .map(|id| self.dataseries.get(id))
+                .collect::<Vec<Option<&DataSeries<NumericDataPoint>>>>();
+
+            // check if all reference dataseries are present
+            if reference_dataseries.iter().any(|ds| ds.is_none()) {
+                return -1;
+            }
+
+            let reference_dataseries = reference_dataseries.iter()
+                .map(|ds| ds.unwrap())
+                .collect::<Vec<&DataSeries<NumericDataPoint>>>();
+
+            let mut new_timestamps = vec![];
+            for ds in reference_dataseries.iter() {
+                for dp in ds.values.iter() {
+                    new_timestamps.push(dp.timestamp);
+                }
+            }
+            new_timestamps.sort();
+            new_timestamps.dedup();
+
+            let mut new_values = vec![];
+            for timestamp in new_timestamps.iter() {
+                let value = self.get_value(dataseries_id, *timestamp);
+                match value {
+                    Some(value) => {
+                        new_values.push(DataPoint {
+                            id: 0,
+                            timestamp: *timestamp,
+                            value: NumericDataPoint {
+                                numeric: value,
+                            }
+                        });
+                    },
+                    None => {
+                        println!("No value found for timestamp: {:?}", timestamp);
+                    }
+                }
+            }
+
+            let dataseries = self.dataseries.get_mut(&dataseries_id).unwrap();
+            dataseries.values = new_values;
+
+            dataseries_id
+        }
+
+    }
+
+    #[test]
+    fn simple_compute() -> Result<()> {
+        // Initialize the state with dataseries
+        let mut dataseries_a = DataSeries {
+            metadata: DataSeriesMetadata {
+                external_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")?,
+                name: "dataseries_a".to_string(),
+                description: "test dataseries A".to_string(),
+                data_type: intercom::schemas::dataseries_capnp::DataType::Numeric,
+                interpolation_strategy: intercom::schemas::baker_capnp::InterpolationStrategy::NoInterpolation,
+                time_window: 0,
+            },
+            values: vec![]
+        };
+        let mut dataseries_b = DataSeries {
+            metadata: DataSeriesMetadata {
+                external_id: Uuid::parse_str("7d5ce80b-8c2f-4861-b1de-55aa6d564f36")?,
+                name: "dataseries_b".to_string(),
+                description: "test dataseries B".to_string(),
+                data_type: intercom::schemas::dataseries_capnp::DataType::Numeric,
+                interpolation_strategy: intercom::schemas::baker_capnp::InterpolationStrategy::NoInterpolation,
+                time_window: 0,
+            },
+            values: vec![]
+        };
+
+        // now - 24 hours
+        let reference_time = chrono::Utc::now() - chrono::Duration::hours(24);
+        for i in 0..10 {
+            // reference time + i hours
+            let timestamp: DateTime<chrono::Utc> = reference_time + chrono::Duration::minutes(i);
+            dataseries_a.values.push(DataPoint {
+                id: i,
+                timestamp,
+                value: NumericDataPoint {
+                    numeric: 1.0 + (i as f64) * 1.0,
+                }
+            });
+        }
+        for i in 0..10 {
+            // reference time + i hours
+            let timestamp: DateTime<chrono::Utc> = reference_time + chrono::Duration::minutes(i + 5);
+            dataseries_b.values.push(DataPoint {
+                id: i,
+                timestamp,
+                value: NumericDataPoint {
+                    numeric: 1.0 + (i as f64) * 1.0,
+                }
+            });
+        }
+
+        let mut state = MyState {
+            dataseries: HashMap::new(),
+        };
+
+        state.dataseries.insert(1, dataseries_a);
+        state.dataseries.insert(2, dataseries_b);
+
+        let engine = Engine::default();
+        let mut store = Store::new(&engine, state);
+
+        // Create the linker and add the functions
+        let mut linker = Linker::new(&engine);
+
+        // void *_get_dataseries_id_by_alias(const char* id);
+        linker.func_wrap("env", "_get_dataseries_id_by_alias", |mut caller: Caller<'_, MyState>, alias_ptr: i32| -> i64 {
+            println!("Getting dataseries id by alias...");
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let (data, store) = memory.data_and_store_mut(&mut caller);
+            // Read the alias from the memory
+            let c_alias = {
+                data.get(alias_ptr as usize..)
+                    .unwrap()
+                    .split(|&b| b == 0)
+                    .next()
+                    .unwrap()
+            };
+
+            let alias = std::str::from_utf8(c_alias).unwrap();
+            println!("Alias: {:?}", alias);
+
+            // Find the dataseries by alias
+            let dataseries = store.get_dataseries_id_by_alias(alias);
+            match dataseries {
+                Some(id) => id,
+                None => -1,
+            }
+        })?;
+
+        // int64_t _copy_dataseries(int64_t dataseries_id);
+        linker.func_wrap("env", "_copy_dataseries", |mut caller: Caller<'_, MyState>, dataseries_id: i64| -> i64 {
+            println!("Copying dataseries...");
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let (_data, store) = memory.data_and_store_mut(&mut caller);
+
+            let new_id = store.copy_dataseries(dataseries_id);
+
+            println!("New dataseries id: {:?}", new_id);
+            new_id
+        })?;
+
+        // int64_t _set_interpolation_strategy(int64_t dataseries_id, int64_t interpolation_strategy);
+        linker.func_wrap("env", "_set_interpolation_strategy", |mut caller: Caller<'_, MyState>, dataseries_id: i64, interpolation_strategy: i64| -> i64 {
+            println!("Setting interpolation strategy {} for dataseries id: {}", interpolation_strategy, dataseries_id);
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let (_data, store) = memory.data_and_store_mut(&mut caller);
+
+            let new_id = store.set_interpolation_strategy(dataseries_id, interpolation_strategy);
+
+            println!("Dataseries id: {:?}", new_id);
+            new_id
+        })?;
+
+        // int64_t _set_time_window(int64_t dataseries_id, uint64_t time_window);
+        linker.func_wrap("env", "_set_time_window", |mut caller: Caller<'_, MyState>, dataseries_id: i64, time_window: u64| -> i64 {
+            println!("Setting time window...");
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let (_data, store) = memory.data_and_store_mut(&mut caller);
+
+            let new_id = store.set_time_window(dataseries_id, time_window);
+
+            println!("Dataseries id: {:?}", new_id);
+            new_id
+        })?;
+
+        // int64_t _add(int64_t dataseries_a_id, int64_t dataseries_b_id);
+        linker.func_wrap("env", "_add", |mut caller: Caller<'_, MyState>, dataseries_a_id: i64, dataseries_b_id: i64| -> i64 {
+            println!("Adding dataseries {} and {}...", dataseries_a_id, dataseries_b_id);
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let (_data, store) = memory.data_and_store_mut(&mut caller);
+
+            let new_id = store.add(dataseries_a_id, dataseries_b_id);
+
+            println!("Result dataseries id: {:?}", new_id);
+            new_id
+        })?;
+
+        // int64_t _mirroring(int64_t dataseries_id, int64_t reference_dataseries_ids[], int32_t reference_dataseries_ids_count);
+        linker.func_wrap("env", "_mirroring", |mut caller: Caller<'_, MyState>, dataseries_id: i64, reference_dataseries_ids_ptr: i32, reference_dataseries_ids_count: i32| -> i64 {
+            println!("Mirroring dataseries...");
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let (data, store) = memory.data_and_store_mut(&mut caller);
+
+            println!("Reference dataseries count: {:?}", reference_dataseries_ids_count);
+            let reference_dataseries_ids = {
+                let mut ids = vec![];
+                for i in 0..reference_dataseries_ids_count {
+                    let id = data
+                        .get((reference_dataseries_ids_ptr + i as i32 * 8) as usize..(reference_dataseries_ids_ptr + i as i32 * 8 + 8) as usize)
+                        .unwrap();
+                    let id = i64::from_le_bytes(id.try_into().unwrap());
+
+                    println!("Reference dataseries id: {:?}", id);
+                    ids.push(id);
+                }
+                ids
+            };
+
+            let id = store.mirroring(dataseries_id, reference_dataseries_ids);
+            println!("Mirroring result dataseries id: {:?}", id);
+
+            id
+        })?;
+
+        // void _set_result_dataseries(int64_t dataseries_id);
+        linker.func_wrap("env", "_set_result_dataseries", |mut caller: Caller<'_, MyState>, dataseries_id: i64| {
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let (data, store) = memory.data_and_store_mut(&mut caller);
+
+            println!("Result dataseries id: {:?}", dataseries_id);
+            println!("Result dataseries: {:?}", store.dataseries.get(&dataseries_id).unwrap());
+
+            let dataseries = store.dataseries.get(&dataseries_id).unwrap();
+
+            for dp in dataseries.values.iter() {
+                let timestamp = dp.timestamp;
+                let value = dp.value.numeric;
+                println!("{:?}: {:?}", timestamp, value);
+            }
+
+        })?;
+
+        let compute_module = Module::from_file(&engine, "test.wasm")?;
+
+        linker.module(&mut store, "test.wasm", &compute_module)?;
+
+        // Run the compute function
+        println!("Running compute function...");
+        let compute = linker.get(&mut store, "test.wasm", "custom_entry").unwrap().into_func().unwrap();
+        let params = vec![];
+        let mut resultes = vec![];
+        println!("Calling compute function...");
+        let result = compute.call(&mut store, &params, &mut resultes);
+
+        match result {
+            Ok(_) => println!("Compute function executed successfully"),
+            Err(e) => println!("Error executing compute function: {:?}", e),
+        }
+
+        Ok(())
+    }
 }
+
+// clear && emcc test.c -g -o test.wasm -s ERROR_ON_UNDEFINED_SYMBOLS=0
+// "C:\Users\Jedson Gabriel\Documents\WABT\bin\wasm2wat.exe" test.wasm > test.wat
+// clear && emcc test.c -g -o test.wasm -s ERROR_ON_UNDEFINED_SYMBOLS=0 --no-entry  && "C:\Users\Jedson Gabriel\Documents\WABT\bin\wasm2wat.exe" test.wasm > test.wat

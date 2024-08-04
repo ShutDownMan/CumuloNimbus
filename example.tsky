@@ -1,0 +1,23 @@
+
+function main(linear_coef, temp_coef, digit_ref, temp_ref, press_ref, frequency, thermistor, barometer):
+    G = locf linear_coef;
+    K = locf temp_coef;
+    D0 = locf digit_ref;
+    T0 = locf temp_ref;
+    B0 = locf press_ref;
+
+    F = lerp frequency within 15min;
+    R = locf thermistor within 1h;
+    B = locf barometer within 1h;
+
+    D = F**2/1000;
+
+    T = (1 / (0.0014051 + 0.0002369 * LOG(R) + 0.0000001019 * (LOG(R)**3))) - 273.2;
+
+    return (G * (D - D0) + K * (T - T0) - 0.1 * (B - B0)) mirroring (frequency, thermistor, barometer)
+
+function main(dataseries_a, dataseries_b):
+    A = locf dataseries_a;
+    B = lerp dataseries_b;
+
+    return A + B mirroring (dataseries_a, dataseries_b);

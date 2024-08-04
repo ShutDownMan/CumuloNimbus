@@ -13,25 +13,30 @@ struct DataSeriesMetadata @0x821c3fb4ffd24f27 {
 	dataType @3 :DataType;
 }
 
-struct NumericDataPoint {
-	numeric @0 :Float64;
+struct DataSeries(DataPointType) {
+	metadata @0 :DataSeriesMetadata;
+	values @1 :List(DataPoint(DataPointType));
 }
 
-struct TextDataPoint {
-	text @0 :Text;
-}
+# struct NumericDataSeries @0xfbe7a844aea55332 {
+# 	metadata @0 :DataSeriesMetadata;
+# 	values @1 :List(DataPoint(NumericDataPoint));
+# }
+
+# struct TextDataSeries @0xd89a838a72415d8c {
+# 	metadata @0 :DataSeriesMetadata;
+# 	values @1 :List(DataPoint(TextDataPoint));
+# }
 
 struct DataPoint(DataPointType) {
 	timestamp @0 :Int64;
 	value @1 :DataPointType;
 }
 
-struct NumericDataSeries @0xfbe7a844aea55332 {
-	metadata @0 :DataSeriesMetadata;
-	values @1 :List(DataPoint(NumericDataPoint));
+struct NumericDataPoint {
+	numeric @0 :Float64;
 }
 
-struct TextDataSeries @0xd89a838a72415d8c {
-	metadata @0 :DataSeriesMetadata;
-	values @1 :List(DataPoint(TextDataPoint));
+struct TextDataPoint {
+	text @0 :Text;
 }

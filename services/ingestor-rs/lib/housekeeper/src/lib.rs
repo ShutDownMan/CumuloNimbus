@@ -100,7 +100,7 @@ impl Housekeeper {
                     while patience > config.patience_min_threshold {
                         // send the pending datapoints
                         tokio::task::yield_now().await; // gives sqlx a chance to release the previous connection
-                        let send_result = microkeeper::send_pending_datapoints(
+                        let send_result = microkeeper::send_pending_numeric_datapoints(
                             self.sqlite_pool.clone(), self.service_bus.clone(), dataseries_id, false).await;
 
                         match send_result {

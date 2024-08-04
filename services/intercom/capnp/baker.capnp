@@ -1,15 +1,12 @@
 # baker.capnp
 @0x8ace90cb3ebb8f12;
 
-using import "./dataseries.capnp".NumericDataSeries;
-using import "./dataseries.capnp".TextDataSeries;
-
 # @0xd0f63a71ca1c7184
-struct ComputeDataSeries(T) {
+struct ComputeDataSeries(DataSeries) {
 	id @0 :Text;
 
 	struct Dependency {
-		dependency @0 :T;
+		dependency @0 :DataSeries;
 	}
 	dependencies @1 :List(Dependency);
 }
@@ -25,7 +22,7 @@ struct ComputeAndPersistDataSeries @0xdf9bf64da6e19f86 {
 struct StoreRecipe @0xd8ddc4097cb667c1 {
 	id @0 :Text;
 	simplifiedExpression @1 :Text;
-	expression @2 :Text;
+	wasmExpression @2 :Text;
 
 	name @3 :Text;
 	description @4 :Text;
@@ -46,6 +43,12 @@ struct StoreRecipe @0xd8ddc4097cb667c1 {
 enum TemporalStrategy {
 	mirror @0;
 	fixedInterval @1;
+}
+
+enum InterpolationStrategy {
+	noInterpolation @0;
+	locf @1;
+	lerp @2;
 }
 
 struct FetchRecipe @0xd50f2b456abd2e0f {

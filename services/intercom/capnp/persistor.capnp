@@ -1,8 +1,7 @@
 # persistor.capnp
 @0x9d15012e82f5c7e5;
 
-using import "./dataseries.capnp".NumericDataSeries;
-using import "./dataseries.capnp".TextDataSeries;
+using import "./dataseries.capnp".DataSeries;
 
 enum MergeStrategy {
 	replace @0;
@@ -16,8 +15,8 @@ struct PersistDataSeriesOptions @0xc48cf0dab8226b88 {
 	name @1 :Text;
 }
 
-struct PersistDataSeries(T) {
-	dataseries @0 :T;
+struct PersistDataSeries(DataPointType) {
+	dataseries @0 :DataSeries(DataPointType);
 
 	options @1 :PersistDataSeriesOptions;
 }
